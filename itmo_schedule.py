@@ -59,6 +59,7 @@ class ITMOScheduleFetcher:
                 return False
             
             # Шаг 2: Ищем ссылку на авторизацию ITMO ID
+            # Используем html.parser вместо lxml для совместимости
             soup = BeautifulSoup(response.text, 'html.parser')
             
             # Ищем форму авторизации или ссылку на ITMO ID
@@ -85,6 +86,7 @@ class ITMOScheduleFetcher:
                 auth_response = self.session.get(login_link, timeout=10)
                 
                 if auth_response.status_code == 200:
+                    # Используем html.parser вместо lxml
                     auth_soup = BeautifulSoup(auth_response.text, 'html.parser')
                     
                     # Ищем форму входа
@@ -261,6 +263,7 @@ class ITMOScheduleFetcher:
         Returns:
             Словарь с расписанием в формате для бота
         """
+        # Используем html.parser (встроенный в Python, не требует lxml)
         soup = BeautifulSoup(html, 'html.parser')
         schedule = {
             'date': target_date,
