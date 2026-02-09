@@ -752,17 +752,40 @@ class ITMOScheduleFetcher:
             # Если API не сработал, парсим HTML страницу
             schedule_url = f"{self.base_url}/schedule"
             params = {'date': date_str}
+            logger.info(f"🌐 Запрос расписания: {schedule_url} с параметрами {params}")
             response = self.session.get(schedule_url, params=params, timeout=10)
             
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения расписания: {response.status_code}")
-                return None
+                logger.error(f"URL: {response.url}")
+                # Проверяем, может быть нужна повторная авторизация
+                if response.status_code in [401, 403] or 'login' in response.url.lower():
+                    logger.warning("⚠️ Похоже, что сессия истекла. Пробуем повторную авторизацию...")
+                    if self.authenticate():
+                        # Повторяем запрос после авторизации
+                        response = self.session.get(schedule_url, params=params, timeout=10)
+                        if response.status_code != 200:
+                            logger.error(f"❌ Ошибка получения расписания после повторной авторизации: {response.status_code}")
+                            return None
+                    else:
+                        logger.error("❌ Не удалось повторно авторизоваться")
+                        return None
+                else:
+                    return None
             
             # Проверяем кодировку ответа
             if response.encoding is None or response.encoding.lower() not in ['utf-8', 'utf8']:
                 response.encoding = 'utf-8'
             
-            # Логируем первые символы для отладки (если нужно)
+            # Логируем информацию о полученном ответе
+            logger.info(f"✅ Получен ответ: {len(response.text)} символов, URL: {response.url}")
+            
+            # Проверяем, что мы не попали на страницу авторизации
+            if 'login' in response.url.lower() or 'id.itmo.ru' in response.url:
+                logger.warning("⚠️ Получена страница авторизации вместо расписания")
+                return None
+            
+            # Логируем первые символы для отладки
             if not response.text or len(response.text) < 100:
                 logger.warning(f"⚠️ Получен очень короткий ответ: {len(response.text)} символов")
                 logger.warning(f"Первые 200 символов: {response.text[:200]}")
@@ -795,18 +818,26 @@ class ITMOScheduleFetcher:
             'classes': []
         }
         
+        logger.info(f"🔍 Начало парсинга HTML расписания (длина: {len(html)} символов)")
+        
         # Ищем все элементы с классом "lesson" (структура из скриншота)
         lesson_elements = soup.find_all('div', class_=re.compile(r'lesson', re.I))
+        logger.info(f"📚 Найдено элементов с классом 'lesson': {len(lesson_elements)}")
         
         for lesson_elem in lesson_elements:
             class_info = self._parse_lesson_element(lesson_elem)
             if class_info:
                 schedule['classes'].append(class_info)
+                logger.info(f"✅ Добавлено занятие: {class_info.get('subject', 'Unknown')}")
         
         # Если не нашли через класс lesson, пробуем альтернативные селекторы
         if not schedule['classes']:
+            logger.warning("⚠️ Не найдено занятий через класс 'lesson', пробуем альтернативные методы...")
+            
             # Ищем по структуре времени
             time_elements = soup.find_all('div', class_=re.compile(r'time', re.I))
+            logger.info(f"⏰ Найдено элементов с классом 'time': {len(time_elements)}")
+            
             for time_elem in time_elements:
                 # Ищем родительский элемент с информацией о паре
                 parent = time_elem.find_parent('div', class_=re.compile(r'lesson|schedule|calendar', re.I))
@@ -814,6 +845,37 @@ class ITMOScheduleFetcher:
                     class_info = self._parse_lesson_element(parent)
                     if class_info:
                         schedule['classes'].append(class_info)
+                        logger.info(f"✅ Добавлено занятие через time: {class_info.get('subject', 'Unknown')}")
+            
+            # Пробуем найти через data-атрибуты или другие селекторы
+            if not schedule['classes']:
+                # Ищем все элементы, которые могут содержать информацию о занятиях
+                possible_selectors = [
+                    ('div', {'data-testid': re.compile(r'lesson|class|schedule', re.I)}),
+                    ('div', {'class': re.compile(r'schedule-item|class-item|event', re.I)}),
+                    ('article', {}),
+                    ('section', {'class': re.compile(r'schedule|calendar', re.I)}),
+                ]
+                
+                for tag, attrs in possible_selectors:
+                    elements = soup.find_all(tag, attrs)
+                    logger.info(f"🔍 Найдено элементов {tag} с атрибутами {attrs}: {len(elements)}")
+                    for elem in elements[:10]:  # Проверяем первые 10
+                        class_info = self._parse_lesson_element(elem)
+                        if class_info:
+                            schedule['classes'].append(class_info)
+                            logger.info(f"✅ Добавлено занятие через {tag}: {class_info.get('subject', 'Unknown')}")
+        
+        logger.info(f"📊 Итого найдено занятий: {len(schedule['classes'])}")
+        
+        # Если ничего не найдено, логируем структуру страницы для отладки
+        if not schedule['classes']:
+            logger.warning("⚠️ Занятия не найдены. Структура страницы:")
+            # Ищем основные контейнеры
+            main_containers = soup.find_all(['main', 'section', 'div'], class_=re.compile(r'main|content|schedule|calendar', re.I))
+            logger.warning(f"   Найдено основных контейнеров: {len(main_containers)}")
+            # Логируем первые 1000 символов HTML для анализа
+            logger.warning(f"   Первые 1000 символов HTML: {html[:1000]}")
         
         return schedule
     
