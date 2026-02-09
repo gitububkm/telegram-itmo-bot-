@@ -56,12 +56,15 @@ class ITMOScheduleFetcher:
             schedule_url = f"{self.base_url}/schedule"
             response = self.session.get(schedule_url, timeout=10, allow_redirects=True)
             
+            logger.info(f"📍 URL после редиректа: {response.url}")
+            
             # Шаг 2: Ищем ссылку на OAuth авторизацию или получаем её из редиректа
             oauth_url = None
             
             # Проверяем, есть ли в ответе ссылка на id.itmo.ru
             if 'id.itmo.ru' in response.url:
                 oauth_url = response.url
+                logger.info(f"✅ Найден OAuth URL из редиректа: {oauth_url}")
             else:
                 # Парсим HTML и ищем ссылку на авторизацию
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -71,6 +74,7 @@ class ITMOScheduleFetcher:
                     href = link.get('href', '')
                     if 'id.itmo.ru' in href and 'openid-connect' in href:
                         oauth_url = href
+                        logger.info(f"✅ Найден OAuth URL из ссылки: {oauth_url}")
                         break
                 
                 # Если не нашли, пробуем найти форму или редирект
@@ -81,49 +85,88 @@ class ITMOScheduleFetcher:
                         content = meta_refresh.get('content', '')
                         if 'url=' in content:
                             oauth_url = content.split('url=')[1]
+                            logger.info(f"✅ Найден OAuth URL из meta refresh: {oauth_url}")
             
             if not oauth_url:
-                # Пробуем стандартный OAuth URL
+                # Пробуем стандартный OAuth URL (без code_challenge, так как он генерируется динамически)
                 oauth_url = f"{self.id_url}/auth/realms/itmo/protocol/openid-connect/auth"
                 params = {
                     'protocol': 'oauth2',
                     'response_type': 'code',
                     'client_id': 'student-personal-cabinet',
                     'redirect_uri': f'{self.base_url}/login/callback',
-                    'scope': 'openid profile',
-                    'code_challenge_method': 'S256'
+                    'scope': 'openid profile'
                 }
+                logger.info(f"🔗 Используем стандартный OAuth URL с параметрами")
                 # Получаем страницу авторизации
-                response = self.session.get(oauth_url, params=params, timeout=10)
+                response = self.session.get(oauth_url, params=params, timeout=10, allow_redirects=True)
                 oauth_url = response.url
-            
-            logger.info(f"🔗 Переход на страницу OAuth авторизации: {oauth_url}")
+                logger.info(f"📍 Финальный OAuth URL: {oauth_url}")
             
             # Шаг 3: Получаем страницу входа
-            auth_response = self.session.get(oauth_url, timeout=10)
+            auth_response = self.session.get(oauth_url, timeout=10, allow_redirects=True)
             
             if auth_response.status_code != 200:
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {auth_response.status_code}")
+                logger.error(f"URL: {auth_response.url}")
                 return False
+            
+            logger.info(f"✅ Получена страница авторизации: {auth_response.url}")
             
             # Шаг 4: Парсим форму входа
             auth_soup = BeautifulSoup(auth_response.text, 'html.parser')
             
-            # Ищем форму входа
+            # Ищем форму входа - пробуем разные варианты
+            login_form = None
+            
+            # Вариант 1: Простая форма
             login_form = auth_soup.find('form')
+            
+            # Вариант 2: Форма по id
             if not login_form:
-                # Пробуем найти форму по id или class
-                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth', re.I)}) or \
-                            auth_soup.find('form', {'class': re.compile(r'login|auth', re.I)})
+                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth|kc-form', re.I)})
+            
+            # Вариант 3: Форма по class
+            if not login_form:
+                login_form = auth_soup.find('form', {'class': re.compile(r'login|auth|kc-form', re.I)})
+            
+            # Вариант 4: Форма по action
+            if not login_form:
+                for form in auth_soup.find_all('form'):
+                    action = form.get('action', '')
+                    if 'login' in action.lower() or 'auth' in action.lower():
+                        login_form = form
+                        break
+            
+            # Вариант 5: Ищем форму с полем password
+            if not login_form:
+                for form in auth_soup.find_all('form'):
+                    if form.find('input', {'type': 'password'}):
+                        login_form = form
+                        break
             
             if not login_form:
-                logger.error("❌ Не найдена форма авторизации")
+                # Логируем структуру страницы для отладки
+                forms = auth_soup.find_all('form')
+                logger.error(f"❌ Не найдена форма авторизации. Найдено форм на странице: {len(forms)}")
+                if forms:
+                    for i, form in enumerate(forms):
+                        logger.error(f"  Форма {i+1}: id={form.get('id')}, class={form.get('class')}, action={form.get('action')}")
+                # Сохраняем HTML для отладки (первые 2000 символов)
+                logger.error(f"HTML страницы (первые 2000 символов): {auth_response.text[:2000]}")
                 return False
+            
+            logger.info(f"✅ Найдена форма авторизации: action={login_form.get('action')}")
             
             # Получаем action формы
             form_action = login_form.get('action', '')
-            if not form_action.startswith('http'):
+            if not form_action:
+                # Если action пустой, используем текущий URL
+                form_action = auth_response.url
+            elif not form_action.startswith('http'):
                 form_action = urljoin(self.id_url, form_action)
+            
+            logger.info(f"📤 Action формы: {form_action}")
             
             # Собираем все скрытые поля формы
             form_data = {}
@@ -132,20 +175,50 @@ class ITMOScheduleFetcher:
                 value = hidden_input.get('value', '')
                 if name:
                     form_data[name] = value
+                    logger.debug(f"  Скрытое поле: {name} = {value[:50] if len(value) > 50 else value}")
             
-            # Ищем поля для логина и пароля
-            username_field = login_form.find('input', {'type': 'text'}) or \
-                           login_form.find('input', {'name': re.compile(r'user|login|email|username', re.I)}) or \
-                           login_form.find('input', {'id': re.compile(r'user|login|email|username', re.I)})
+            # Ищем поля для логина и пароля - пробуем разные варианты
+            username_field = None
+            password_field = None
             
+            # Вариант 1: По типу
+            username_field = login_form.find('input', {'type': 'text'})
             password_field = login_form.find('input', {'type': 'password'})
+            
+            # Вариант 2: По name
+            if not username_field:
+                username_field = login_form.find('input', {'name': re.compile(r'user|login|email|username', re.I)})
+            if not password_field:
+                password_field = login_form.find('input', {'name': re.compile(r'password|pass', re.I)})
+            
+            # Вариант 3: По id
+            if not username_field:
+                username_field = login_form.find('input', {'id': re.compile(r'user|login|email|username', re.I)})
+            if not password_field:
+                password_field = login_form.find('input', {'id': re.compile(r'password|pass', re.I)})
+            
+            # Вариант 4: Любое текстовое поле и любое поле пароля
+            if not username_field:
+                for inp in login_form.find_all('input'):
+                    inp_type = inp.get('type', '').lower()
+                    if inp_type in ['text', 'email']:
+                        username_field = inp
+                        break
+            
+            if not password_field:
+                password_field = login_form.find('input', {'type': 'password'})
             
             if not username_field or not password_field:
                 logger.error("❌ Не найдены поля для логина или пароля")
+                logger.error(f"  Найдено input полей: {len(login_form.find_all('input'))}")
+                for inp in login_form.find_all('input'):
+                    logger.error(f"    Input: type={inp.get('type')}, name={inp.get('name')}, id={inp.get('id')}")
                 return False
             
             username_name = username_field.get('name') or username_field.get('id', 'username')
             password_name = password_field.get('name') or password_field.get('id', 'password')
+            
+            logger.info(f"✅ Найдены поля: username={username_name}, password={password_name}")
             
             form_data[username_name] = self.login
             form_data[password_name] = self.password
