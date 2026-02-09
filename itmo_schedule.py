@@ -662,17 +662,18 @@ class ITMOScheduleFetcher:
                     logger.info("✅ Уже авторизован! Ошибка 400 была из-за истекшей сессии, но доступ есть.")
                     return True
                 
-                # Если не авторизованы, возможно нужно обновить сессию
-                logger.warning("⚠️ Попытка обновить сессию...")
-                # Пробуем получить новую страницу авторизации (используем базовый OAuth URL)
-                base_oauth_url = f"{self.id_url}/auth/realms/itmo/protocol/openid-connect/auth"
-                new_auth_response = self.session.get(base_oauth_url, params={'client_id': 'student-personal-cabinet'}, timeout=10, allow_redirects=True)
-                if new_auth_response.status_code == 200 and 'my.itmo.ru' in new_auth_response.url:
-                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
-                    if test_response.status_code == 200:
-                        self.is_authenticated = True
-                        logger.info("✅ Авторизация успешна после обновления сессии!")
-                        return True
+                # Если не авторизованы, нужно выполнить полную авторизацию заново
+                logger.warning("⚠️ Попытка выполнить полную авторизацию заново...")
+                # Сбрасываем флаг авторизации и начинаем с начала
+                self.is_authenticated = False
+                # Вызываем полный процесс авторизации (начнется с проверки статуса)
+                # Но сначала очистим сессию для чистого старта
+                self.session.cookies.clear()
+                # Вызываем authenticate() который выполнит полную авторизацию
+                # Но нам нужно обойти проверку "уже авторизован" в начале authenticate()
+                # Поэтому просто возвращаем False здесь, и authenticate() будет вызван из get_schedule_for_date
+                logger.warning("⚠️ Требуется полная повторная авторизация")
+                return False
             
             if login_response.status_code in [200, 302, 303, 307, 308]:
                 final_url = login_response.url
@@ -685,12 +686,16 @@ class ITMOScheduleFetcher:
                 
                 # Если редирект на другую страницу, проверяем доступ к расписанию
                 if login_response.history:
-                    # Проверяем доступ к расписанию
-                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
-                    if test_response.status_code == 200:
+                    # Проверяем доступ к расписанию с редиректами
+                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=True)
+                    # Проверяем, что мы действительно получили страницу расписания, а не авторизации
+                    if test_response.status_code == 200 and 'login' not in test_response.url.lower() and 'id.itmo.ru' not in test_response.url:
                         self.is_authenticated = True
                         logger.info("✅ Авторизация успешна (проверено через доступ к расписанию)!")
+                        logger.info(f"📍 Проверка доступа: URL={test_response.url}, размер={len(test_response.text)}")
                         return True
+                    else:
+                        logger.warning(f"⚠️ После авторизации все еще получаем: {test_response.url}")
                 
                 # Если в ответе есть ошибка
                 if 'error' in final_url.lower() or 'error' in login_response.text.lower()[:500]:
@@ -788,26 +793,58 @@ class ITMOScheduleFetcher:
                 # Сбрасываем флаг авторизации
                 self.is_authenticated = False
                 
-                # Пробуем авторизоваться заново
+                # Очищаем сессию для чистого старта
+                logger.info("🧹 Очищаем cookies сессии для повторной авторизации...")
+                self.session.cookies.clear()
+                
+                # Пробуем авторизоваться заново (полная авторизация)
                 if self.authenticate():
                     logger.info("✅ Повторная авторизация успешна, повторяем запрос расписания...")
-                    # Повторяем запрос расписания после авторизации
-                    response = self.session.get(schedule_url, params=params, timeout=10)
                     
-                    if response.status_code != 200:
-                        logger.error(f"❌ Ошибка получения расписания после повторной авторизации: {response.status_code}")
-                        return None
+                    # Небольшая задержка для установки cookies
+                    import time
+                    time.sleep(1)  # Увеличиваем задержку до 1 секунды
                     
-                    # Проверяем кодировку ответа
-                    if response.encoding is None or response.encoding.lower() not in ['utf-8', 'utf8']:
-                        response.encoding = 'utf-8'
+                    # Логируем cookies для отладки
+                    logger.info(f"🍪 Cookies в сессии: {len(self.session.cookies)} cookies")
+                    if self.session.cookies:
+                        cookie_names = [cookie.name for cookie in self.session.cookies]
+                        logger.info(f"🍪 Имена cookies: {cookie_names[:5]}...")  # Первые 5
+                    else:
+                        logger.warning("⚠️ Cookies не установлены после авторизации!")
                     
-                    # Проверяем снова, не попали ли на страницу авторизации
-                    if 'login' in response.url.lower() or 'id.itmo.ru' in response.url:
-                        logger.error("❌ После повторной авторизации все еще получаем страницу авторизации")
-                        return None
-                    
-                    logger.info(f"✅ Получен ответ после повторной авторизации: {len(response.text)} символов, URL: {response.url}")
+                    # Повторяем запрос расписания после авторизации с редиректами
+                    # Пробуем несколько раз с задержками, если нужно
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        if attempt > 0:
+                            logger.info(f"🔄 Попытка {attempt + 1} из {max_retries}...")
+                            time.sleep(1)
+                        
+                        response = self.session.get(schedule_url, params=params, timeout=10, allow_redirects=True)
+                        
+                        if response.status_code != 200:
+                            logger.error(f"❌ Ошибка получения расписания после повторной авторизации: {response.status_code}")
+                            logger.error(f"URL: {response.url}")
+                            if attempt < max_retries - 1:
+                                continue
+                            return None
+                        
+                        # Проверяем кодировку ответа
+                        if response.encoding is None or response.encoding.lower() not in ['utf-8', 'utf8']:
+                            response.encoding = 'utf-8'
+                        
+                        # Проверяем, не попали ли на страницу авторизации
+                        if 'login' in response.url.lower() or 'id.itmo.ru' in response.url:
+                            logger.warning(f"⚠️ Попытка {attempt + 1}: все еще получаем страницу авторизации: {response.url}")
+                            if attempt < max_retries - 1:
+                                continue
+                            logger.error("❌ Все попытки не удались - все еще получаем страницу авторизации")
+                            return None
+                        
+                        # Успех!
+                        logger.info(f"✅ Получен ответ после повторной авторизации (попытка {attempt + 1}): {len(response.text)} символов, URL: {response.url}")
+                        break
                 else:
                     logger.error("❌ Не удалось выполнить повторную авторизацию")
                     return None
