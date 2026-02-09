@@ -263,18 +263,32 @@ def set_webhook():
             logger.error("❌ Не найден токен бота в переменной окружения TELEGRAM_BOT_TOKEN")
             return False
 
-        # Получаем URL приложения из переменной окружения или используем Render URL
-        # Render автоматически устанавливает RENDER_SERVICE_NAME
-        app_name = os.getenv('RENDER_APP_NAME') or os.getenv('RENDER_SERVICE_NAME')
-        if app_name:
-            webhook_url = f"https://{app_name}.onrender.com/webhook"
-        else:
-            # Если RENDER_APP_NAME не установлен, используем переменную WEBHOOK_URL
-            webhook_url = os.getenv('WEBHOOK_URL')
-            if not webhook_url:
-                logger.error("❌ Не установлены переменные окружения RENDER_APP_NAME, RENDER_SERVICE_NAME или WEBHOOK_URL")
-                logger.error("💡 Установите RENDER_APP_NAME=telegram-itmo-bot в Render Dashboard")
+        # Получаем URL приложения из переменной окружения
+        # В Render Free Tier URL имеет формат: https://<service-name>-<random-id>.onrender.com
+        # Поэтому лучше использовать полный WEBHOOK_URL
+        
+        # Сначала проверяем WEBHOOK_URL (полный URL)
+        webhook_url = os.getenv('WEBHOOK_URL')
+        
+        # Если WEBHOOK_URL не установлен, пробуем построить из RENDER_APP_NAME
+        if not webhook_url:
+            app_name = os.getenv('RENDER_APP_NAME') or os.getenv('RENDER_SERVICE_NAME')
+            if app_name:
+                # Пробуем использовать базовое имя (может не работать в Free Tier)
+                webhook_url = f"https://{app_name}.onrender.com/webhook"
+                logger.warning(f"⚠️ Используется базовый URL. Если не работает, установите WEBHOOK_URL с полным URL")
+            else:
+                logger.error("❌ Не установлены переменные окружения WEBHOOK_URL, RENDER_APP_NAME или RENDER_SERVICE_NAME")
+                logger.error("💡 Установите WEBHOOK_URL=https://telegram-itmo-bot-x7i6.onrender.com/webhook в Render Dashboard")
+                logger.error("💡 Или RENDER_APP_NAME=telegram-itmo-bot (может не работать в Free Tier)")
                 return False
+        else:
+            # Убеждаемся, что WEBHOOK_URL заканчивается на /webhook
+            if not webhook_url.endswith('/webhook'):
+                if webhook_url.endswith('/'):
+                    webhook_url = webhook_url + 'webhook'
+                else:
+                    webhook_url = webhook_url + '/webhook'
 
         logger.info(f"🔗 Установка webhook: {webhook_url}")
 
