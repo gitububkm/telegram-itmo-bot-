@@ -230,6 +230,7 @@ class ITMOScheduleFetcher:
                         continue
                     
                     # Ищем tab_id и session_code в kcContext
+                    # Вариант 1: Прямое значение в объекте (tab_id: "value")
                     tab_id_match = re.search(r'tab_id["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
                     session_match = re.search(r'session_code["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
                     
@@ -238,11 +239,49 @@ class ITMOScheduleFetcher:
                     if session_match:
                         session_code = session_match.group(1)
                     
+                    # Вариант 2: В query строке (tab_id=value&session_code=value)
+                    if not tab_id or not session_code:
+                        # Ищем query строку с параметрами
+                        query_match = re.search(r'["\']query["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
+                        if query_match:
+                            query_string = query_match.group(1)
+                            # Извлекаем tab_id из query
+                            tab_id_query = re.search(r'tab_id=([^&"\']+)', query_string)
+                            if tab_id_query:
+                                tab_id = tab_id_query.group(1)
+                            # Извлекаем session_code из query
+                            session_query = re.search(r'session_code=([^&"\']+)', query_string)
+                            if session_query:
+                                session_code = session_query.group(1)
+                    
+                    # Вариант 3: В rawQuery строке
+                    if not tab_id or not session_code:
+                        raw_query_match = re.search(r'["\']rawQuery["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
+                        if raw_query_match:
+                            query_string = raw_query_match.group(1)
+                            tab_id_query = re.search(r'tab_id=([^&"\']+)', query_string)
+                            if tab_id_query:
+                                tab_id = tab_id_query.group(1)
+                            session_query = re.search(r'session_code=([^&"\']+)', query_string)
+                            if session_query:
+                                session_code = session_query.group(1)
+                    
                     # Ищем URL авторизации
                     if 'login-actions' in script_text or 'authenticate' in script_text:
                         url_match = re.search(r'["\']([^"\']*login-actions[^"\']*)["\']', script_text)
                         if url_match:
                             auth_action_url = url_match.group(1)
+                
+                # Логируем результаты поиска
+                if tab_id:
+                    logger.info(f"✅ Найден tab_id: {tab_id[:30]}...")
+                else:
+                    logger.warning("⚠️ tab_id не найден в JavaScript")
+                
+                if session_code:
+                    logger.info(f"✅ Найден session_code: {session_code[:30]}...")
+                else:
+                    logger.warning("⚠️ session_code не найден в JavaScript")
                 
                 # Если нашли данные, пробуем прямую авторизацию
                 if tab_id and session_code:
@@ -251,6 +290,7 @@ class ITMOScheduleFetcher:
                         auth_action_url = f"{self.id_url}/auth/realms/itmo/login-actions/authenticate"
                     
                     logger.info(f"🔗 Найдены данные Keycloak: tab_id={tab_id[:20]}..., session_code={session_code[:20]}...")
+                    logger.info(f"🔗 URL авторизации: {auth_action_url}")
                     return self._direct_keycloak_auth_with_params(auth_action_url, tab_id, session_code)
                 
                 # Если не нашли tab_id и session_code, не пытаемся напрямую обращаться к authenticate endpoint
@@ -411,13 +451,24 @@ class ITMOScheduleFetcher:
             }
             
             # Получаем страницу авторизации с параметрами
-            response = self.session.get(auth_url, params=params, timeout=10, allow_redirects=True)
+            # Пробуем сначала без редиректов, чтобы увидеть, что возвращает сервер
+            response = self.session.get(auth_url, params=params, timeout=10, allow_redirects=False)
+            
+            # Если редирект, следуем ему
+            if response.status_code in [302, 301, 303, 307, 308]:
+                redirect_url = response.headers.get('Location', '')
+                if redirect_url:
+                    if not redirect_url.startswith('http'):
+                        redirect_url = urljoin(self.id_url, redirect_url)
+                    logger.info(f"📍 Редирект на: {redirect_url}")
+                    response = self.session.get(redirect_url, timeout=10, allow_redirects=True)
             
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {response.status_code}")
                 logger.error(f"URL: {response.url}")
                 if response.status_code == 400:
                     logger.error("⚠️ Ошибка 400 обычно означает неверные параметры запроса")
+                    logger.error(f"Параметры запроса: {params}")
                 return False
             
             # Парсим форму
