@@ -116,8 +116,22 @@ class ITMOScheduleFetcher:
             
             logger.info(f"✅ Получена страница авторизации: {auth_response.url}")
             
+            # Проверяем кодировку и декодируем ответ
+            if auth_response.encoding is None or auth_response.encoding.lower() not in ['utf-8', 'utf8']:
+                auth_response.encoding = 'utf-8'
+            
+            # Логируем информацию о ответе для отладки
+            logger.debug(f"Content-Type: {auth_response.headers.get('Content-Type')}")
+            logger.debug(f"Encoding: {auth_response.encoding}")
+            logger.debug(f"Длина ответа: {len(auth_response.text)} символов")
+            
             # Шаг 4: Парсим форму входа
-            auth_soup = BeautifulSoup(auth_response.text, 'html.parser')
+            try:
+                auth_soup = BeautifulSoup(auth_response.text, 'html.parser')
+            except Exception as e:
+                logger.error(f"❌ Ошибка парсинга HTML страницы авторизации: {e}")
+                logger.error(f"Первые 500 символов ответа: {auth_response.text[:500]}")
+                return False
             
             # Ищем форму входа - пробуем разные варианты
             login_form = None
