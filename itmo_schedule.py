@@ -281,7 +281,24 @@ class ITMOScheduleFetcher:
             
             logger.info(f"📅 Запрос расписания на {date_str}...")
             
-            # Получаем страницу расписания с параметром даты
+            # Пробуем получить через API (если есть)
+            api_url = f"{self.base_url}/api/schedule"
+            params = {'date': date_str}
+            
+            try:
+                api_response = self.session.get(api_url, params=params, timeout=10)
+                if api_response.status_code == 200:
+                    try:
+                        data = api_response.json()
+                        if data:
+                            logger.info("✅ Расписание получено через API")
+                            return self._parse_api_schedule(data, target_date)
+                    except:
+                        pass
+            except:
+                pass
+            
+            # Если API не сработал, парсим HTML страницу
             schedule_url = f"{self.base_url}/schedule"
             params = {'date': date_str}
             response = self.session.get(schedule_url, params=params, timeout=10)
@@ -438,6 +455,116 @@ class ITMOScheduleFetcher:
             
         except Exception as e:
             logger.error(f"Ошибка парсинга элемента пары: {e}")
+            return None
+    
+    def _parse_api_schedule(self, data: Dict, target_date: datetime) -> Dict:
+        """
+        Парсит расписание из JSON API ответа
+        
+        Args:
+            data: JSON данные от API
+            target_date: Дата расписания
+            
+        Returns:
+            Словарь с расписанием в формате для бота
+        """
+        schedule = {
+            'date': target_date,
+            'classes': []
+        }
+        
+        # Парсим структуру API (может отличаться, нужно адаптировать)
+        if isinstance(data, list):
+            for item in data:
+                class_info = self._extract_class_info_from_api(item)
+                if class_info:
+                    schedule['classes'].append(class_info)
+        elif isinstance(data, dict):
+            # Пробуем разные возможные ключи
+            for key in ['schedule', 'classes', 'lessons', 'items', 'data']:
+                if key in data:
+                    items = data[key] if isinstance(data[key], list) else [data[key]]
+                    for item in items:
+                        class_info = self._extract_class_info_from_api(item)
+                        if class_info:
+                            schedule['classes'].append(class_info)
+                    break
+        
+        return schedule
+    
+    def _extract_class_info_from_api(self, item: Dict) -> Optional[Dict]:
+        """
+        Извлекает информацию о паре из JSON объекта API
+        
+        Args:
+            item: JSON объект с данными о паре
+            
+        Returns:
+            Словарь с информацией о паре или None
+        """
+        try:
+            class_info = {}
+            
+            # Пробуем разные возможные ключи
+            time_keys = ['time', 'start_time', 'time_start', 'begin_time', 'lesson_time', 'timeRange']
+            subject_keys = ['subject', 'name', 'title', 'lesson_name', 'discipline', 'subjectName']
+            room_keys = ['room', 'audience', 'auditorium', 'classroom', 'room_number', 'roomNumber']
+            address_keys = ['address', 'location', 'building', 'address_name', 'buildingAddress']
+            teacher_keys = ['teacher', 'instructor', 'lecturer', 'teacher_name', 'teacherName', 'educator']
+            
+            for key in time_keys:
+                if key in item:
+                    time_val = item[key]
+                    if isinstance(time_val, dict):
+                        # Если время в формате объекта
+                        start = time_val.get('start') or time_val.get('begin')
+                        end = time_val.get('end') or time_val.get('finish')
+                        if start and end:
+                            class_info['time'] = f"{start}-{end}"
+                        elif start:
+                            class_info['time'] = str(start)
+                    else:
+                        class_info['time'] = str(time_val)
+                    break
+            
+            for key in subject_keys:
+                if key in item:
+                    class_info['subject'] = str(item[key])
+                    break
+            
+            for key in room_keys:
+                if key in item:
+                    class_info['room'] = str(item[key])
+                    break
+            
+            for key in address_keys:
+                if key in item:
+                    class_info['address'] = str(item[key])
+                    break
+            
+            for key in teacher_keys:
+                if key in item:
+                    teacher_val = item[key]
+                    if isinstance(teacher_val, dict):
+                        # Если преподаватель в формате объекта
+                        name = teacher_val.get('name') or teacher_val.get('fullName')
+                        if name:
+                            class_info['teacher'] = str(name)
+                    else:
+                        class_info['teacher'] = str(teacher_val)
+                    break
+            
+            if 'subject' in class_info or 'time' in class_info:
+                class_info.setdefault('time', 'Время не указано')
+                class_info.setdefault('subject', 'Предмет не указан')
+                class_info.setdefault('room', 'Аудитория не указана')
+                class_info.setdefault('address', 'Адрес не указан')
+                return class_info
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Ошибка извлечения информации о паре из API: {e}")
             return None
     
     def get_week_schedule(self, start_date: Optional[datetime] = None) -> List[Dict]:
