@@ -13,6 +13,7 @@ import logging
 import time
 import asyncio
 import threading
+import requests
 from flask import Flask, request, jsonify
 from telegram import Bot
 from telegram.error import TelegramError
@@ -257,30 +258,30 @@ def set_webhook():
 
         logger.info(f"🔗 Установка webhook: {webhook_url}")
 
-        # Создаем event loop для асинхронного вызова
-        import asyncio
-
-        async def _set_webhook():
-            bot = Bot(token=token)
-            return await bot.set_webhook(url=webhook_url)
-
-        # Создаем новый event loop для асинхронного вызова
+        # Используем синхронный метод через requests вместо asyncio
+        import requests
+        
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_set_webhook())
-            loop.close()
-
-            if result:
-                logger.info("✅ Webhook успешно установлен")
-                bot_status['webhook_set'] = True
-                return True
+            set_webhook_url = f"https://api.telegram.org/bot{token}/setWebhook"
+            data = {'url': webhook_url}
+            
+            response = requests.post(set_webhook_url, data=data, timeout=10)
+            
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('ok'):
+                    logger.info("✅ Webhook успешно установлен")
+                    bot_status['webhook_set'] = True
+                    return True
+                else:
+                    logger.error(f"❌ Ошибка установки webhook: {result.get('description', 'Unknown error')}")
+                    return False
             else:
-                logger.error("❌ Не удалось установить webhook")
+                logger.error(f"❌ HTTP ошибка при установке webhook: {response.status_code}")
                 return False
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при создании event loop: {e}")
+            logger.error(f"❌ Ошибка при установке webhook: {e}")
             return False
 
     except TelegramError as e:
