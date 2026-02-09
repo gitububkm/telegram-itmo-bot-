@@ -69,6 +69,7 @@ def start_update_processor():
                         continue
 
                     logger.info(f"Обработка обновления: {update_data.get('update_id', 'unknown')}")
+                    logger.info(f"Тип обновления: {list(update_data.keys())}")
 
                     if telegram_application:
                         # Проверяем, что приложение инициализировано
@@ -78,16 +79,24 @@ def start_update_processor():
 
                         # Создаем Update объект из JSON данных
                         from telegram import Update
-                        update = Update.de_json(update_data, telegram_application.bot)
-
-                        # Обрабатываем обновление асинхронно
-                        await telegram_application.process_update(update)
-                        logger.info(f"✅ Успешно обработан webhook update: {update.update_id}")
+                        try:
+                            update = Update.de_json(update_data, telegram_application.bot)
+                            logger.info(f"✅ Update объект создан: update_id={update.update_id}")
+                            
+                            # Обрабатываем обновление асинхронно
+                            await telegram_application.process_update(update)
+                            logger.info(f"✅ Успешно обработан webhook update: {update.update_id}")
+                        except Exception as e:
+                            logger.error(f"❌ Ошибка при обработке update: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
                     else:
                         logger.error("❌ Telegram Application не инициализирован")
 
                 except Exception as e:
-                    logger.error(f"Ошибка обработки обновления: {e}")
+                    logger.error(f"❌ Ошибка обработки обновления: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
             logger.info("Цикл обработки обновлений завершен")
 
@@ -134,12 +143,21 @@ def webhook():
         update_id = update_data.get('update_id', 'unknown')
         logger.info(f"📨 Получен webhook update: {update_id}")
 
-        # Проверяем тип обновления
+        # Проверяем тип обновления и логируем
         if 'message' in update_data:
             message = update_data['message']
             user_id = message.get('from', {}).get('id', 'unknown')
             text = message.get('text', 'no text')
             logger.info(f"📨 Сообщение от пользователя {user_id}: '{text}'")
+        elif 'callback_query' in update_data:
+            callback = update_data['callback_query']
+            user_id = callback.get('from', {}).get('id', 'unknown')
+            data = callback.get('data', 'no data')
+            logger.info(f"🔘 Callback query от пользователя {user_id}: {data}")
+        elif 'edited_message' in update_data:
+            logger.info(f"✏️ Отредактированное сообщение")
+        else:
+            logger.info(f"📋 Другой тип обновления: {list(update_data.keys())}")
 
         # Обновляем статус последнего обновления
         bot_status['last_update'] = time.time()
@@ -246,14 +264,16 @@ def set_webhook():
             return False
 
         # Получаем URL приложения из переменной окружения или используем Render URL
-        app_name = os.getenv('RENDER_APP_NAME')
+        # Render автоматически устанавливает RENDER_SERVICE_NAME
+        app_name = os.getenv('RENDER_APP_NAME') or os.getenv('RENDER_SERVICE_NAME')
         if app_name:
             webhook_url = f"https://{app_name}.onrender.com/webhook"
         else:
             # Если RENDER_APP_NAME не установлен, используем переменную WEBHOOK_URL
             webhook_url = os.getenv('WEBHOOK_URL')
             if not webhook_url:
-                logger.error("❌ Не установлены переменные окружения RENDER_APP_NAME или WEBHOOK_URL")
+                logger.error("❌ Не установлены переменные окружения RENDER_APP_NAME, RENDER_SERVICE_NAME или WEBHOOK_URL")
+                logger.error("💡 Установите RENDER_APP_NAME=telegram-itmo-bot в Render Dashboard")
                 return False
 
         logger.info(f"🔗 Установка webhook: {webhook_url}")

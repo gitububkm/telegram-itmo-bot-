@@ -440,9 +440,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик ошибок"""
-    logger.error(f'Update {update} caused error {context.error}')
+    logger.error(f'❌ Update {update} caused error {context.error}')
+    import traceback
+    logger.error(traceback.format_exc())
     if update and update.message:
-        await update.message.reply_text('❌ Произошла ошибка. Попробуйте еще раз.')
+        try:
+            await update.message.reply_text('❌ Произошла ошибка. Попробуйте еще раз.')
+        except Exception as e:
+            logger.error(f"❌ Не удалось отправить сообщение об ошибке: {e}")
 
 async def create_application():
     """Создает и настраивает Telegram Application асинхронно"""
