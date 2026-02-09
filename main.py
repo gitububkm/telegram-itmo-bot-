@@ -188,8 +188,15 @@ def get_schedule_for_date(date_str=None):
     
     try:
         if date_str:
-            # Парсим дату в формате ДД.ММ
-            day, month = map(int, date_str.split('.'))
+            # Парсим дату в формате ДД.ММ или ДД/ММ
+            date_str = date_str.strip()
+            if '/' in date_str:
+                day, month = map(int, date_str.split('/'))
+            elif '.' in date_str:
+                day, month = map(int, date_str.split('.'))
+            else:
+                return "❌ Неверный формат даты. Используйте формат ДД.ММ или ДД/ММ"
+            
             year = datetime.now(ZoneInfo("Europe/Moscow")).year
             target_date = datetime(year, month, day, tzinfo=ZoneInfo("Europe/Moscow"))
         else:
@@ -245,7 +252,7 @@ def get_schedule_for_date(date_str=None):
 
         return f"❌ Расписание для {weekday_name} не найдено"
     except ValueError:
-        return "❌ Неверный формат даты. Используйте формат ДД.ММ"
+        return "❌ Неверный формат даты. Используйте формат ДД.ММ или ДД/ММ"
     except Exception as e:
         logger.error(f"Ошибка получения расписания: {e}")
         return "❌ Ошибка при получении расписания"
@@ -399,7 +406,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'date':
         await query.edit_message_text(
-            text='📝 Введите дату в формате ДД.ММ (например: 25.12)\n\nПосле ввода даты выберите следующее действие:',
+            text='📝 Введите дату в формате ДД.ММ или ДД/ММ (например: 25.12 или 25/12)\n\nПосле ввода даты выберите следующее действие:',
             reply_markup=get_main_menu()
         )
         context.user_data['waiting_for_date'] = True

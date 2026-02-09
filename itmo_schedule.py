@@ -495,65 +495,126 @@ class ITMOScheduleFetcher:
                     logger.error(f"Параметры запроса: {params}")
                 return False
             
-            # Парсим форму
+            # Парсим URL для извлечения параметров
+            from urllib.parse import urlparse, parse_qs
+            parsed_url = urlparse(auth_url)
+            url_params = parse_qs(parsed_url.query)
+            
+            # Извлекаем параметры из URL
+            execution = url_params.get('execution', [None])[0]
+            client_id = url_params.get('client_id', [None])[0]
+            client_data = url_params.get('client_data', [None])[0]
+            
+            # Пробуем найти форму в HTML (на случай, если она есть)
             soup = BeautifulSoup(response.text, 'html.parser')
             form = soup.find('form')
             
+            # Если форма не найдена (SPA приложение), используем прямой POST
             if not form:
-                logger.error("❌ Форма не найдена на странице Keycloak")
-                # Пробуем найти форму в другом месте
-                form = soup.find('form', {'id': re.compile(r'kc-form|login', re.I)})
-                if not form:
-                    logger.error(f"HTML страницы (первые 1000 символов): {response.text[:1000]}")
+                logger.info("⚠️ Форма не найдена в HTML (SPA приложение), используем прямой POST")
+                
+                # Формируем URL для POST запроса (убираем query параметры из URL)
+                post_url = f"{self.id_url}/auth/realms/itmo/login-actions/authenticate"
+                
+                # Формируем данные для POST запроса
+                form_data = {
+                    'username': self.login,
+                    'password': self.password,
+                    'tab_id': tab_id,
+                    'session_code': session_code,
+                }
+                
+                # Добавляем параметры из URL, если они есть
+                if execution:
+                    form_data['execution'] = execution
+                if client_id:
+                    form_data['client_id'] = client_id
+                if client_data:
+                    form_data['client_data'] = client_data
+                
+                # Добавляем стандартные поля для Keycloak
+                form_data['credentialId'] = ''
+                
+                logger.info("📤 Отправка данных авторизации через прямой POST...")
+                login_response = self.session.post(
+                    post_url,
+                    data=form_data,
+                    params={
+                        'tab_id': tab_id,
+                        'session_code': session_code
+                    },
+                    allow_redirects=True,
+                    timeout=10
+                )
+            else:
+                # Стандартный путь через форму (если она найдена)
+                form_action = form.get('action', '')
+                if not form_action:
+                    form_action = response.url
+                elif not form_action.startswith('http'):
+                    form_action = urljoin(self.id_url, form_action)
+                
+                # Собираем данные формы
+                form_data = {}
+                for hidden_input in form.find_all('input', type='hidden'):
+                    name = hidden_input.get('name')
+                    value = hidden_input.get('value', '')
+                    if name:
+                        form_data[name] = value
+                
+                # Ищем поля логина и пароля
+                username_field = form.find('input', {'type': 'text'}) or form.find('input', {'name': re.compile(r'user|login|email', re.I)})
+                password_field = form.find('input', {'type': 'password'})
+                
+                if not username_field or not password_field:
+                    logger.error("❌ Не найдены поля для логина или пароля")
                     return False
-            
-            # Получаем action формы
-            form_action = form.get('action', '')
-            if not form_action:
-                form_action = response.url
-            elif not form_action.startswith('http'):
-                form_action = urljoin(self.id_url, form_action)
-            
-            # Собираем данные формы
-            form_data = {}
-            for hidden_input in form.find_all('input', type='hidden'):
-                name = hidden_input.get('name')
-                value = hidden_input.get('value', '')
-                if name:
-                    form_data[name] = value
-            
-            # Ищем поля логина и пароля
-            username_field = form.find('input', {'type': 'text'}) or form.find('input', {'name': re.compile(r'user|login|email', re.I)})
-            password_field = form.find('input', {'type': 'password'})
-            
-            if not username_field or not password_field:
-                logger.error("❌ Не найдены поля для логина или пароля")
-                return False
-            
-            username_name = username_field.get('name') or username_field.get('id', 'username')
-            password_name = password_field.get('name') or password_field.get('id', 'password')
-            
-            form_data[username_name] = self.login
-            form_data[password_name] = self.password
-            
-            # Отправляем форму
-            logger.info("📤 Отправка данных авторизации...")
-            login_response = self.session.post(
-                form_action,
-                data=form_data,
-                allow_redirects=True,
-                timeout=10
-            )
+                
+                username_name = username_field.get('name') or username_field.get('id', 'username')
+                password_name = password_field.get('name') or password_field.get('id', 'password')
+                
+                form_data[username_name] = self.login
+                form_data[password_name] = self.password
+                
+                # Отправляем форму
+                logger.info("📤 Отправка данных авторизации через форму...")
+                login_response = self.session.post(
+                    form_action,
+                    data=form_data,
+                    allow_redirects=True,
+                    timeout=10
+                )
             
             # Проверяем успешность
-            if login_response.status_code in [200, 302]:
+            logger.info(f"📊 Статус ответа авторизации: {login_response.status_code}")
+            logger.info(f"📍 Финальный URL: {login_response.url}")
+            
+            if login_response.status_code in [200, 302, 303, 307, 308]:
                 final_url = login_response.url
+                
+                # Проверяем, что мы попали на my.itmo.ru или получили редирект
                 if 'my.itmo.ru' in final_url or 'schedule' in final_url.lower():
                     self.is_authenticated = True
                     logger.info("✅ Прямая авторизация через Keycloak успешна!")
                     return True
+                
+                # Если редирект на другую страницу, проверяем доступ к расписанию
+                if login_response.history:
+                    # Проверяем доступ к расписанию
+                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
+                    if test_response.status_code == 200:
+                        self.is_authenticated = True
+                        logger.info("✅ Авторизация успешна (проверено через доступ к расписанию)!")
+                        return True
+                
+                # Если в ответе есть ошибка
+                if 'error' in final_url.lower() or 'error' in login_response.text.lower()[:500]:
+                    logger.error(f"❌ Ошибка в ответе авторизации: {login_response.text[:500]}")
+                    return False
             
-            logger.error("❌ Прямая авторизация не удалась")
+            logger.error(f"❌ Прямая авторизация не удалась. Статус: {login_response.status_code}, URL: {login_response.url}")
+            if login_response.text:
+                logger.error(f"Ответ сервера (первые 500 символов): {login_response.text[:500]}")
             return False
             
         except Exception as e:
