@@ -8,6 +8,9 @@ import os
 import re
 import logging
 import requests
+import secrets
+import base64
+import hashlib
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from bs4 import BeautifulSoup
@@ -91,23 +94,59 @@ class ITMOScheduleFetcher:
                             logger.info(f"✅ Найден OAuth URL из meta refresh: {oauth_url}")
             
             if not oauth_url:
-                # Пробуем стандартный OAuth URL (без code_challenge, так как он генерируется динамически)
+                # Генерируем PKCE параметры для OAuth (требуется для безопасности)
+                code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8').rstrip('=')
+                code_challenge = base64.urlsafe_b64encode(
+                    hashlib.sha256(code_verifier.encode('utf-8')).digest()
+                ).decode('utf-8').rstrip('=')
+                
+                # Пробуем стандартный OAuth URL с PKCE
                 oauth_url = f"{self.id_url}/auth/realms/itmo/protocol/openid-connect/auth"
                 params = {
                     'protocol': 'oauth2',
                     'response_type': 'code',
                     'client_id': 'student-personal-cabinet',
                     'redirect_uri': f'{self.base_url}/login/callback',
-                    'scope': 'openid profile'
+                    'scope': 'openid profile',
+                    'code_challenge_method': 'S256',
+                    'code_challenge': code_challenge
                 }
-                logger.info(f"🔗 Используем стандартный OAuth URL с параметрами")
+                logger.info(f"🔗 Используем стандартный OAuth URL с PKCE параметрами")
                 # Получаем страницу авторизации
-                response = self.session.get(oauth_url, params=params, timeout=10, allow_redirects=True)
-                oauth_url = response.url
+                response = self.session.get(oauth_url, params=params, timeout=10, allow_redirects=False)
+                
+                # Если редирект, проверяем URL
+                if response.status_code in [302, 301, 303, 307, 308]:
+                    redirect_url = response.headers.get('Location', '')
+                    if redirect_url:
+                        oauth_url = redirect_url if redirect_url.startswith('http') else urljoin(self.id_url, redirect_url)
+                    else:
+                        oauth_url = response.url
+                else:
+                    oauth_url = response.url
+                
                 logger.info(f"📍 Финальный OAuth URL: {oauth_url}")
+                
+                # Проверяем, нет ли ошибки в URL
+                if 'error=' in oauth_url:
+                    error_desc = parse_qs(urlparse(oauth_url).query).get('error_description', [])
+                    logger.error(f"❌ OAuth ошибка в URL: {oauth_url}")
+                    if error_desc:
+                        logger.error(f"   Описание ошибки: {error_desc[0]}")
+                    return False
             
             # Шаг 3: Получаем страницу входа
             auth_response = self.session.get(oauth_url, timeout=10, allow_redirects=True)
+            
+            # Проверяем, нет ли ошибки OAuth в финальном URL
+            if 'error=' in auth_response.url:
+                error_params = parse_qs(urlparse(auth_response.url).query)
+                error = error_params.get('error', ['unknown'])[0]
+                error_desc = error_params.get('error_description', [''])[0]
+                logger.error(f"❌ OAuth ошибка после редиректа: {error}")
+                logger.error(f"   Описание: {error_desc}")
+                logger.error(f"   URL: {auth_response.url}")
+                return False
             
             if auth_response.status_code != 200:
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {auth_response.status_code}")
