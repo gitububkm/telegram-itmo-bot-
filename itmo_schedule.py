@@ -30,6 +30,7 @@ class ITMOScheduleFetcher:
         self.login = login
         self.password = password
         self.session = requests.Session()
+        # requests автоматически обрабатывает gzip/deflate, но нужно убедиться
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -38,6 +39,8 @@ class ITMOScheduleFetcher:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         })
+        # Убеждаемся, что requests автоматически декодирует ответы
+        # requests автоматически обрабатывает gzip/deflate через urllib3
         self.base_url = "https://my.itmo.ru"
         self.id_url = "https://id.itmo.ru"
         self.is_authenticated = False
@@ -306,6 +309,15 @@ class ITMOScheduleFetcher:
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения расписания: {response.status_code}")
                 return None
+            
+            # Проверяем кодировку ответа
+            if response.encoding is None or response.encoding.lower() not in ['utf-8', 'utf8']:
+                response.encoding = 'utf-8'
+            
+            # Логируем первые символы для отладки (если нужно)
+            if not response.text or len(response.text) < 100:
+                logger.warning(f"⚠️ Получен очень короткий ответ: {len(response.text)} символов")
+                logger.warning(f"Первые 200 символов: {response.text[:200]}")
             
             return self._parse_html_schedule(response.text, target_date)
                 
