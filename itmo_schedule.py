@@ -180,11 +180,11 @@ class ITMOScheduleFetcher:
             
             # Вариант 2: Форма по id
             if not login_form:
-                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth|kc-form', re.I)})
+                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth|kc-form|kc-login', re.I)})
             
             # Вариант 3: Форма по class
             if not login_form:
-                login_form = auth_soup.find('form', {'class': re.compile(r'login|auth|kc-form', re.I)})
+                login_form = auth_soup.find('form', {'class': re.compile(r'login|auth|kc-form|kc-login', re.I)})
             
             # Вариант 4: Форма по action
             if not login_form:
@@ -200,6 +200,51 @@ class ITMOScheduleFetcher:
                     if form.find('input', {'type': 'password'}):
                         login_form = form
                         break
+            
+            # Вариант 6: Пробуем найти данные авторизации в JavaScript (Keycloak SPA)
+            if not login_form:
+                # Keycloak использует JavaScript для рендеринга формы
+                # Пробуем найти данные в kcContext или других скриптах
+                script_tags = auth_soup.find_all('script')
+                auth_action_url = None
+                tab_id = None
+                session_code = None
+                
+                for script in script_tags:
+                    script_text = script.string or ''
+                    if not script_text:
+                        continue
+                    
+                    # Ищем tab_id и session_code в kcContext
+                    tab_id_match = re.search(r'tab_id["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
+                    session_match = re.search(r'session_code["\']?\s*:\s*["\']([^"\']+)["\']', script_text)
+                    
+                    if tab_id_match:
+                        tab_id = tab_id_match.group(1)
+                    if session_match:
+                        session_code = session_match.group(1)
+                    
+                    # Ищем URL авторизации
+                    if 'login-actions' in script_text or 'authenticate' in script_text:
+                        url_match = re.search(r'["\']([^"\']*login-actions[^"\']*)["\']', script_text)
+                        if url_match:
+                            auth_action_url = url_match.group(1)
+                
+                # Если нашли данные, пробуем прямую авторизацию
+                if tab_id and session_code:
+                    # Формируем URL для авторизации
+                    if not auth_action_url:
+                        auth_action_url = f"{self.id_url}/auth/realms/itmo/login-actions/authenticate"
+                    
+                    logger.info(f"🔗 Найдены данные Keycloak: tab_id={tab_id[:20]}..., session_code={session_code[:20]}...")
+                    return self._direct_keycloak_auth_with_params(auth_action_url, tab_id, session_code)
+                
+                # Если не нашли, пробуем стандартный endpoint
+                logger.info("🔗 Пробуем стандартный Keycloak endpoint для авторизации")
+                return self._direct_keycloak_auth_with_params(
+                    f"{self.id_url}/auth/realms/itmo/login-actions/authenticate",
+                    None, None
+                )
             
             if not login_form:
                 # Логируем структуру страницы для отладки
@@ -309,6 +354,102 @@ class ITMOScheduleFetcher:
             return False
         except Exception as e:
             logger.error(f"❌ Неожиданная ошибка при авторизации: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return False
+    
+    def _direct_keycloak_auth_with_params(self, auth_url: str, tab_id: Optional[str] = None, session_code: Optional[str] = None) -> bool:
+        """
+        Прямая авторизация через Keycloak с параметрами из JavaScript контекста
+        
+        Args:
+            auth_url: URL для авторизации
+            tab_id: Tab ID из kcContext
+            session_code: Session code из kcContext
+            
+        Returns:
+            True если авторизация успешна
+        """
+        try:
+            logger.info(f"🔐 Попытка прямой авторизации через Keycloak: {auth_url}")
+            
+            # Формируем параметры запроса
+            params = {}
+            if tab_id:
+                params['tab_id'] = tab_id
+            if session_code:
+                params['session_code'] = session_code
+            
+            # Получаем страницу авторизации
+            response = self.session.get(auth_url, params=params if params else None, timeout=10, allow_redirects=True)
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Ошибка доступа к странице авторизации: {response.status_code}")
+                return False
+            
+            # Парсим форму
+            soup = BeautifulSoup(response.text, 'html.parser')
+            form = soup.find('form')
+            
+            if not form:
+                logger.error("❌ Форма не найдена на странице Keycloak")
+                # Пробуем найти форму в другом месте
+                form = soup.find('form', {'id': re.compile(r'kc-form|login', re.I)})
+                if not form:
+                    logger.error(f"HTML страницы (первые 1000 символов): {response.text[:1000]}")
+                    return False
+            
+            # Получаем action формы
+            form_action = form.get('action', '')
+            if not form_action:
+                form_action = response.url
+            elif not form_action.startswith('http'):
+                form_action = urljoin(self.id_url, form_action)
+            
+            # Собираем данные формы
+            form_data = {}
+            for hidden_input in form.find_all('input', type='hidden'):
+                name = hidden_input.get('name')
+                value = hidden_input.get('value', '')
+                if name:
+                    form_data[name] = value
+            
+            # Ищем поля логина и пароля
+            username_field = form.find('input', {'type': 'text'}) or form.find('input', {'name': re.compile(r'user|login|email', re.I)})
+            password_field = form.find('input', {'type': 'password'})
+            
+            if not username_field or not password_field:
+                logger.error("❌ Не найдены поля для логина или пароля")
+                return False
+            
+            username_name = username_field.get('name') or username_field.get('id', 'username')
+            password_name = password_field.get('name') or password_field.get('id', 'password')
+            
+            form_data[username_name] = self.login
+            form_data[password_name] = self.password
+            
+            # Отправляем форму
+            logger.info("📤 Отправка данных авторизации...")
+            login_response = self.session.post(
+                form_action,
+                data=form_data,
+                allow_redirects=True,
+                timeout=10
+            )
+            
+            # Проверяем успешность
+            if login_response.status_code in [200, 302]:
+                final_url = login_response.url
+                if 'my.itmo.ru' in final_url or 'schedule' in final_url.lower():
+                    self.is_authenticated = True
+                    logger.info("✅ Прямая авторизация через Keycloak успешна!")
+                    return True
+            
+            logger.error("❌ Прямая авторизация не удалась")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка прямой авторизации: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return False
