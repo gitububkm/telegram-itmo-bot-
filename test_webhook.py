@@ -242,7 +242,7 @@ def check_webhook_settings():
     print("\n📡 Проверка настроек webhook в Telegram...")
 
     token = os.getenv('TELEGRAM_BOT_TOKEN')
-    app_name = os.getenv('RENDER_APP_NAME', 'telegram-itmo-bot')
+    app_name = os.getenv('RENDER_APP_NAME', 'Bardyshev_schedulebot')
 
     if not token:
         print("❌ TELEGRAM_BOT_TOKEN не установлен")
@@ -283,7 +283,7 @@ def test_webhook_response():
     """Тестирует ответ webhook URL"""
     print("\n🌐 Тестирование ответа webhook URL...")
 
-    app_name = os.getenv('RENDER_APP_NAME', 'telegram-itmo-bot')
+    app_name = os.getenv('RENDER_APP_NAME', 'Bardyshev_schedulebot')
 
     try:
         webhook_url = f"https://{app_name}.onrender.com/webhook"

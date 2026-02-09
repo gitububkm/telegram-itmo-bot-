@@ -19,7 +19,7 @@ def check_environment_variables():
     required_vars = {
         'TELEGRAM_BOT_TOKEN': 'Токен Telegram бота',
         'SCHEDULE_JSON': 'JSON с расписанием',
-        'RENDER_APP_NAME': 'Имя приложения Render (telegram-itmo-bot)'
+        'RENDER_APP_NAME': 'Имя приложения Render (Bardyshev_schedulebot)'
     }
 
     optional_vars = {
@@ -56,7 +56,7 @@ def check_render_service():
     print("\n🌐 ПРОВЕРКА СЕРВИСА RENDER")
     print("=" * 50)
 
-    app_name = os.getenv('RENDER_APP_NAME', 'telegram-itmo-bot')
+    app_name = os.getenv('RENDER_APP_NAME', 'Bardyshev_schedulebot')
     base_url = f"https://{app_name}.onrender.com"
 
     endpoints = [
@@ -99,7 +99,7 @@ def check_telegram_webhook():
     print("=" * 50)
 
     token = os.getenv('TELEGRAM_BOT_TOKEN')
-    app_name = os.getenv('RENDER_APP_NAME', 'telegram-itmo-bot')
+    app_name = os.getenv('RENDER_APP_NAME', 'Bardyshev_schedulebot')
 
     if not token:
         print("❌ TELEGRAM_BOT_TOKEN не установлен")
@@ -274,7 +274,7 @@ if __name__ == "__main__":
             print(f"\n💡 Для диагностики с вашими реальными переменными окружения:")
             print(f"   1. Скопируйте этот файл на сервер с вашими переменными")
             print(f"   2. Или запустите диагностику онлайн:")
-            print(f"      curl -s https://telegram-itmo-bot.onrender.com/check-webhook")
+            print(f"      curl -s https://Bardyshev_schedulebot.onrender.com/check-webhook")
 
         sys.exit(0 if success else 1)
 
