@@ -58,6 +58,25 @@ class ITMOScheduleFetcher:
         try:
             logger.info("🔐 Начало авторизации на my.itmo.ru через OAuth...")
             
+            # Шаг 0: Проверяем, может быть уже авторизованы
+            logger.info("🔍 Проверка текущего статуса авторизации...")
+            test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=False)
+            
+            # Если получили успешный ответ и не редирект на авторизацию - уже авторизованы
+            if test_response.status_code == 200:
+                # Проверяем содержимое страницы - может быть это страница расписания
+                if 'schedule' in test_response.url.lower() or 'my.itmo.ru/schedule' in test_response.url:
+                    # Парсим HTML, чтобы убедиться, что это действительно страница расписания
+                    soup = BeautifulSoup(test_response.text, 'html.parser')
+                    # Ищем признаки страницы расписания (не страницы авторизации)
+                    if 'id.itmo.ru' not in test_response.url and 'login' not in test_response.url.lower():
+                        # Проверяем, есть ли на странице элементы расписания
+                        schedule_indicators = soup.find_all(['div', 'section'], class_=re.compile(r'schedule|lesson|class', re.I))
+                        if schedule_indicators or 'schedule' in test_response.text.lower()[:1000]:
+                            self.is_authenticated = True
+                            logger.info("✅ Уже авторизован! Пропускаем процесс авторизации.")
+                            return True
+            
             # Шаг 1: Получаем страницу расписания (она перенаправит на авторизацию)
             schedule_url = f"{self.base_url}/schedule"
             response = self.session.get(schedule_url, timeout=10, allow_redirects=True)
@@ -138,6 +157,18 @@ class ITMOScheduleFetcher:
             # Шаг 3: Получаем страницу входа
             auth_response = self.session.get(oauth_url, timeout=10, allow_redirects=True)
             
+            # Проверяем, может быть уже авторизованы и получили редирект на расписание
+            if auth_response.status_code in [200, 302, 303, 307, 308]:
+                final_url = auth_response.url
+                # Если попали на my.itmo.ru (не на id.itmo.ru) - возможно уже авторизованы
+                if 'my.itmo.ru' in final_url and 'id.itmo.ru' not in final_url:
+                    # Проверяем доступ к расписанию
+                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
+                    if test_response.status_code == 200 and 'schedule' in test_response.url:
+                        self.is_authenticated = True
+                        logger.info("✅ Уже авторизован! Получен доступ к расписанию.")
+                        return True
+            
             # Проверяем, нет ли ошибки OAuth в финальном URL
             if 'error=' in auth_response.url:
                 error_params = parse_qs(urlparse(auth_response.url).query)
@@ -157,6 +188,14 @@ class ITMOScheduleFetcher:
                 return False
             
             logger.info(f"✅ Получена страница авторизации: {auth_response.url}")
+            
+            # Проверяем содержимое страницы - может быть это уже страница расписания или успешной авторизации
+            soup_check = BeautifulSoup(auth_response.text, 'html.parser')
+            # Ищем признаки того, что мы уже на странице my.itmo.ru (не на странице авторизации)
+            if 'my.itmo.ru' in auth_response.url and 'schedule' in auth_response.url.lower():
+                self.is_authenticated = True
+                logger.info("✅ Уже авторизован! На странице расписания.")
+                return True
             
             # Проверяем кодировку и декодируем ответ
             if auth_response.encoding is None or auth_response.encoding.lower() not in ['utf-8', 'utf8']:
@@ -488,6 +527,18 @@ class ITMOScheduleFetcher:
                     response = self.session.get(redirect_url, timeout=10, allow_redirects=True)
             
             if response.status_code != 200:
+                # Если ошибка 400, возможно сессия истекла или параметры неверны
+                # Проверяем, может быть уже авторизованы через другой способ
+                if response.status_code == 400:
+                    logger.warning("⚠️ Ошибка 400 - возможно сессия истекла или параметры неверны")
+                    logger.warning("🔍 Проверяем, может быть уже авторизованы...")
+                    # Пробуем проверить доступ к расписанию
+                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=False)
+                    if test_response.status_code == 200:
+                        self.is_authenticated = True
+                        logger.info("✅ Уже авторизован! Ошибка 400 была ложной тревогой.")
+                        return True
+                
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {response.status_code}")
                 logger.error(f"URL: {response.url}")
                 if response.status_code == 400:
@@ -504,6 +555,17 @@ class ITMOScheduleFetcher:
             execution = url_params.get('execution', [None])[0]
             client_id = url_params.get('client_id', [None])[0]
             client_data = url_params.get('client_data', [None])[0]
+            
+            # Проверяем, может быть уже авторизованы - проверяем содержимое страницы
+            soup_check = BeautifulSoup(response.text, 'html.parser')
+            # Если на странице нет элементов авторизации, возможно уже авторизованы
+            if 'my.itmo.ru' in response.url and 'id.itmo.ru' not in response.url:
+                # Проверяем доступ к расписанию
+                test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
+                if test_response.status_code == 200:
+                    self.is_authenticated = True
+                    logger.info("✅ Уже авторизован! Проверено через доступ к расписанию.")
+                    return True
             
             # Пробуем найти форму в HTML (на случай, если она есть)
             soup = BeautifulSoup(response.text, 'html.parser')
@@ -588,6 +650,29 @@ class ITMOScheduleFetcher:
             # Проверяем успешность
             logger.info(f"📊 Статус ответа авторизации: {login_response.status_code}")
             logger.info(f"📍 Финальный URL: {login_response.url}")
+            
+            # Если ошибка 400, возможно нужно использовать другой метод
+            if login_response.status_code == 400:
+                logger.warning("⚠️ Ошибка 400 при прямой авторизации")
+                logger.warning("🔍 Проверяем, может быть уже авторизованы...")
+                # Проверяем доступ к расписанию - возможно уже авторизованы
+                test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=False)
+                if test_response.status_code == 200:
+                    self.is_authenticated = True
+                    logger.info("✅ Уже авторизован! Ошибка 400 была из-за истекшей сессии, но доступ есть.")
+                    return True
+                
+                # Если не авторизованы, возможно нужно обновить сессию
+                logger.warning("⚠️ Попытка обновить сессию...")
+                # Пробуем получить новую страницу авторизации (используем базовый OAuth URL)
+                base_oauth_url = f"{self.id_url}/auth/realms/itmo/protocol/openid-connect/auth"
+                new_auth_response = self.session.get(base_oauth_url, params={'client_id': 'student-personal-cabinet'}, timeout=10, allow_redirects=True)
+                if new_auth_response.status_code == 200 and 'my.itmo.ru' in new_auth_response.url:
+                    test_response = self.session.get(f"{self.base_url}/schedule", timeout=10)
+                    if test_response.status_code == 200:
+                        self.is_authenticated = True
+                        logger.info("✅ Авторизация успешна после обновления сессии!")
+                        return True
             
             if login_response.status_code in [200, 302, 303, 307, 308]:
                 final_url = login_response.url
