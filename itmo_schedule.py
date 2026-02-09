@@ -268,9 +268,24 @@ class ITMOScheduleFetcher:
                     
                     # Ищем URL авторизации
                     if 'login-actions' in script_text or 'authenticate' in script_text:
-                        url_match = re.search(r'["\']([^"\']*login-actions[^"\']*)["\']', script_text)
+                        # Ищем различные варианты URL
+                        # Вариант 1: Полный URL в кавычках
+                        url_match = re.search(r'["\'](https?://[^"\']*login-actions[^"\']*)["\']', script_text)
                         if url_match:
                             auth_action_url = url_match.group(1)
+                        else:
+                            # Вариант 2: Относительный путь
+                            url_match = re.search(r'["\']([^"\']*login-actions[^"\']*)["\']', script_text)
+                            if url_match:
+                                auth_action_url = url_match.group(1)
+                                # Убираем экранированные слеши
+                                auth_action_url = auth_action_url.replace('\\/', '/')
+                                # Если путь начинается с /, добавляем базовый URL
+                                if auth_action_url.startswith('/'):
+                                    auth_action_url = f"{self.id_url}{auth_action_url}"
+                                elif not auth_action_url.startswith('http'):
+                                    # Если путь без начального /, добавляем базовый URL и /
+                                    auth_action_url = f"{self.id_url}/{auth_action_url}"
                 
                 # Логируем результаты поиска
                 if tab_id:
@@ -288,6 +303,15 @@ class ITMOScheduleFetcher:
                     # Формируем URL для авторизации
                     if not auth_action_url:
                         auth_action_url = f"{self.id_url}/auth/realms/itmo/login-actions/authenticate"
+                    else:
+                        # Убираем экранированные слеши, если есть
+                        auth_action_url = auth_action_url.replace('\\/', '/')
+                        # Убеждаемся, что URL полный
+                        if not auth_action_url.startswith('http'):
+                            if auth_action_url.startswith('/'):
+                                auth_action_url = f"{self.id_url}{auth_action_url}"
+                            else:
+                                auth_action_url = f"{self.id_url}/{auth_action_url}"
                     
                     logger.info(f"🔗 Найдены данные Keycloak: tab_id={tab_id[:20]}..., session_code={session_code[:20]}...")
                     logger.info(f"🔗 URL авторизации: {auth_action_url}")
