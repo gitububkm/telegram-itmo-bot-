@@ -151,6 +151,9 @@ class ITMOScheduleFetcher:
             if auth_response.status_code != 200:
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {auth_response.status_code}")
                 logger.error(f"URL: {auth_response.url}")
+                logger.error(f"Response headers: {dict(auth_response.headers)}")
+                if auth_response.text:
+                    logger.error(f"Response body (первые 500 символов): {auth_response.text[:500]}")
                 return False
             
             logger.info(f"✅ Получена страница авторизации: {auth_response.url}")
@@ -178,28 +181,39 @@ class ITMOScheduleFetcher:
             # Вариант 1: Простая форма
             login_form = auth_soup.find('form')
             
-            # Вариант 2: Форма по id
+            # Вариант 2: Форма по id (Keycloak часто использует kc-form-login)
             if not login_form:
-                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth|kc-form|kc-login', re.I)})
+                login_form = auth_soup.find('form', {'id': re.compile(r'login|auth|kc-form|kc-login|kc-form-login', re.I)})
             
-            # Вариант 3: Форма по class
+            # Вариант 3: Форма по class (Keycloak использует различные классы)
             if not login_form:
                 login_form = auth_soup.find('form', {'class': re.compile(r'login|auth|kc-form|kc-login', re.I)})
             
-            # Вариант 4: Форма по action
+            # Вариант 4: Форма по action (ищем login-actions/authenticate)
             if not login_form:
                 for form in auth_soup.find_all('form'):
                     action = form.get('action', '')
-                    if 'login' in action.lower() or 'auth' in action.lower():
+                    if 'login' in action.lower() or 'auth' in action.lower() or 'authenticate' in action.lower():
                         login_form = form
+                        logger.info(f"✅ Найдена форма по action: {action}")
                         break
             
-            # Вариант 5: Ищем форму с полем password
+            # Вариант 5: Ищем форму с полем password (самый надежный способ)
             if not login_form:
                 for form in auth_soup.find_all('form'):
-                    if form.find('input', {'type': 'password'}):
+                    password_input = form.find('input', {'type': 'password'})
+                    if password_input:
                         login_form = form
+                        logger.info("✅ Найдена форма по наличию поля password")
                         break
+            
+            # Вариант 6: Ищем форму в div с классом login или auth
+            if not login_form:
+                login_div = auth_soup.find('div', {'class': re.compile(r'login|auth|kc-login', re.I)})
+                if login_div:
+                    login_form = login_div.find('form')
+                    if login_form:
+                        logger.info("✅ Найдена форма внутри div с классом login/auth")
             
             # Вариант 6: Пробуем найти данные авторизации в JavaScript (Keycloak SPA)
             if not login_form:
@@ -239,12 +253,9 @@ class ITMOScheduleFetcher:
                     logger.info(f"🔗 Найдены данные Keycloak: tab_id={tab_id[:20]}..., session_code={session_code[:20]}...")
                     return self._direct_keycloak_auth_with_params(auth_action_url, tab_id, session_code)
                 
-                # Если не нашли, пробуем стандартный endpoint
-                logger.info("🔗 Пробуем стандартный Keycloak endpoint для авторизации")
-                return self._direct_keycloak_auth_with_params(
-                    f"{self.id_url}/auth/realms/itmo/login-actions/authenticate",
-                    None, None
-                )
+                # Если не нашли tab_id и session_code, не пытаемся напрямую обращаться к authenticate endpoint
+                # Вместо этого пробуем найти форму через другие методы или возвращаем ошибку
+                logger.warning("⚠️ Не найдены tab_id и session_code для прямой авторизации Keycloak")
             
             if not login_form:
                 # Логируем структуру страницы для отладки
@@ -253,6 +264,21 @@ class ITMOScheduleFetcher:
                 if forms:
                     for i, form in enumerate(forms):
                         logger.error(f"  Форма {i+1}: id={form.get('id')}, class={form.get('class')}, action={form.get('action')}")
+                
+                # Проверяем, может быть это страница с ошибкой или редиректом
+                if 'error' in auth_response.url.lower() or 'error' in auth_response.text.lower()[:500]:
+                    logger.error("⚠️ Похоже, что на странице есть ошибка")
+                
+                # Проверяем, может быть это JavaScript-приложение (SPA)
+                scripts = auth_soup.find_all('script')
+                if scripts:
+                    logger.info(f"Найдено {len(scripts)} script тегов - возможно, это SPA приложение")
+                    # Ищем упоминания Keycloak или React
+                    for script in scripts[:3]:  # Проверяем первые 3 скрипта
+                        script_text = script.string or ''
+                        if script_text and ('keycloak' in script_text.lower() or 'react' in script_text.lower()):
+                            logger.info("Обнаружено Keycloak/React приложение - форма может рендериться через JavaScript")
+                
                 # Сохраняем HTML для отладки (первые 2000 символов)
                 logger.error(f"HTML страницы (первые 2000 символов): {auth_response.text[:2000]}")
                 return False
@@ -373,18 +399,25 @@ class ITMOScheduleFetcher:
         try:
             logger.info(f"🔐 Попытка прямой авторизации через Keycloak: {auth_url}")
             
-            # Формируем параметры запроса
-            params = {}
-            if tab_id:
-                params['tab_id'] = tab_id
-            if session_code:
-                params['session_code'] = session_code
+            # Проверяем, что у нас есть необходимые параметры
+            if not tab_id or not session_code:
+                logger.error("❌ Недостаточно параметров для прямой авторизации Keycloak (требуются tab_id и session_code)")
+                return False
             
-            # Получаем страницу авторизации
-            response = self.session.get(auth_url, params=params if params else None, timeout=10, allow_redirects=True)
+            # Формируем параметры запроса
+            params = {
+                'tab_id': tab_id,
+                'session_code': session_code
+            }
+            
+            # Получаем страницу авторизации с параметрами
+            response = self.session.get(auth_url, params=params, timeout=10, allow_redirects=True)
             
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка доступа к странице авторизации: {response.status_code}")
+                logger.error(f"URL: {response.url}")
+                if response.status_code == 400:
+                    logger.error("⚠️ Ошибка 400 обычно означает неверные параметры запроса")
                 return False
             
             # Парсим форму
