@@ -85,23 +85,41 @@ def load_schedule():
     """Инициализирует загрузчик расписания с my.itmo.ru"""
     global schedule_fetcher
     
-    # Проверяем, есть ли учетные данные для my.itmo.ru
-    itmo_login = os.getenv('ITMO_LOGIN')
-    itmo_password = os.getenv('ITMO_PASSWORD')
+    # Проверяем, есть ли куки (приоритетный метод)
+    itmo_cookies = os.getenv('ITMO_COOKIES')
     
-    if itmo_login and itmo_password and ITMOScheduleFetcher:
+    if itmo_cookies and ITMOScheduleFetcher:
         try:
-            schedule_fetcher = ITMOScheduleFetcher(itmo_login, itmo_password)
-            logger.info("✅ Инициализирован загрузчик расписания с my.itmo.ru")
+            schedule_fetcher = ITMOScheduleFetcher(cookies=itmo_cookies)
+            logger.info("✅ Инициализирован загрузчик расписания с my.itmo.ru (через куки)")
             
-            # Пробуем авторизоваться сразу
+            # Пробуем авторизоваться через куки
             if schedule_fetcher.authenticate():
-                logger.info("✅ Авторизация на my.itmo.ru успешна")
+                logger.info("✅ Авторизация на my.itmo.ru через куки успешна")
             else:
-                logger.warning("⚠️ Не удалось авторизоваться на my.itmo.ru, будет попытка при первом запросе")
+                logger.warning("⚠️ Куки не работают, возможно они устарели. Обновите куки.")
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации загрузчика расписания: {e}")
+            logger.error(f"❌ Ошибка инициализации загрузчика расписания с куками: {e}")
             schedule_fetcher = None
+    
+    # Если куки не заданы или не сработали, пробуем логин/пароль
+    if not schedule_fetcher:
+        itmo_login = os.getenv('ITMO_LOGIN')
+        itmo_password = os.getenv('ITMO_PASSWORD')
+        
+        if itmo_login and itmo_password and ITMOScheduleFetcher:
+            try:
+                schedule_fetcher = ITMOScheduleFetcher(itmo_login, itmo_password)
+                logger.info("✅ Инициализирован загрузчик расписания с my.itmo.ru (через логин/пароль)")
+                
+                # Пробуем авторизоваться сразу
+                if schedule_fetcher.authenticate():
+                    logger.info("✅ Авторизация на my.itmo.ru успешна")
+                else:
+                    logger.warning("⚠️ Не удалось авторизоваться на my.itmo.ru, будет попытка при первом запросе")
+            except Exception as e:
+                logger.error(f"❌ Ошибка инициализации загрузчика расписания: {e}")
+                schedule_fetcher = None
     
     # Если нет учетных данных для my.itmo.ru, используем старый метод
     if not schedule_fetcher:
@@ -461,7 +479,8 @@ async def create_application():
     if not schedule_fetcher and not SCHEDULE_DATA:
         logger.error("❌ Не удалось инициализировать источник расписания")
         logger.error("Убедитесь, что установлены переменные окружения:")
-        logger.error("  - ITMO_LOGIN и ITMO_PASSWORD (для получения с my.itmo.ru)")
+        logger.error("  - ITMO_COOKIES (рекомендуется, для получения с my.itmo.ru через куки)")
+        logger.error("  - или ITMO_LOGIN и ITMO_PASSWORD (для получения с my.itmo.ru через авторизацию)")
         logger.error("  - или SCHEDULE_JSON (для использования статического расписания)")
         return None
 

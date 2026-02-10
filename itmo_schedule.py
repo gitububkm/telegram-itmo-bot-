@@ -22,13 +22,14 @@ logger = logging.getLogger(__name__)
 class ITMOScheduleFetcher:
     """Класс для получения расписания с my.itmo.ru"""
     
-    def __init__(self, login: str, password: str):
+    def __init__(self, login: str = None, password: str = None, cookies: str = None):
         """
-        Инициализация с учетными данными
+        Инициализация с учетными данными или куками
         
         Args:
-            login: Логин ITMO ID
-            password: Пароль ITMO ID
+            login: Логин ITMO ID (опционально, если используются куки)
+            password: Пароль ITMO ID (опционально, если используются куки)
+            cookies: Строка с куками в формате Netscape или простом формате (опционально)
         """
         self.login = login
         self.password = password
@@ -48,14 +49,123 @@ class ITMOScheduleFetcher:
         self.id_url = "https://id.itmo.ru"
         self.is_authenticated = False
         
+        # Если переданы куки, устанавливаем их
+        if cookies:
+            self.set_cookies_from_string(cookies)
+    
+    def set_cookies_from_string(self, cookies_string: str):
+        """
+        Устанавливает куки из строки в различных форматах
+        
+        Поддерживаемые форматы:
+        1. Netscape формат (из браузера):
+           .example.com	TRUE	/	FALSE	1234567890	cookie_name	cookie_value
+        
+        2. Простой формат (name=value; name2=value2):
+           cookie_name=cookie_value; cookie_name2=cookie_value2
+        
+        3. JSON формат:
+           {"cookie_name": "cookie_value", "cookie_name2": "cookie_value2"}
+        
+        Args:
+            cookies_string: Строка с куками
+        """
+        try:
+            logger.info("🍪 Установка куков из строки...")
+            
+            # Пробуем JSON формат
+            if cookies_string.strip().startswith('{'):
+                try:
+                    import json
+                    cookies_dict = json.loads(cookies_string)
+                    for name, value in cookies_dict.items():
+                        # Устанавливаем куки для домена my.itmo.ru
+                        self.session.cookies.set(name, value, domain='.itmo.ru')
+                        logger.info(f"✅ Установлена кука из JSON: {name}")
+                    return
+                except json.JSONDecodeError:
+                    pass
+            
+            # Пробуем Netscape формат (из браузера)
+            if '\t' in cookies_string or cookies_string.strip().startswith('#'):
+                lines = cookies_string.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    # Пропускаем комментарии и пустые строки
+                    if not line or line.startswith('#'):
+                        continue
+                    
+                    # Netscape формат: domain, flag, path, secure, expiration, name, value
+                    parts = line.split('\t')
+                    if len(parts) >= 7:
+                        domain = parts[0]
+                        name = parts[5]
+                        value = parts[6]
+                        
+                        # Устанавливаем куку
+                        if domain.startswith('.'):
+                            domain = domain[1:]  # Убираем точку в начале
+                        self.session.cookies.set(name, value, domain=domain)
+                        logger.info(f"✅ Установлена кука из Netscape формата: {name} для {domain}")
+                return
+            
+            # Пробуем простой формат (name=value; name2=value2)
+            # Разделяем по точкам с запятой
+            cookie_pairs = cookies_string.split(';')
+            for pair in cookie_pairs:
+                pair = pair.strip()
+                if not pair:
+                    continue
+                
+                if '=' in pair:
+                    name, value = pair.split('=', 1)
+                    name = name.strip()
+                    value = value.strip()
+                    
+                    # Устанавливаем куку для домена my.itmo.ru
+                    self.session.cookies.set(name, value, domain='.itmo.ru')
+                    logger.info(f"✅ Установлена кука из простого формата: {name}")
+            
+            logger.info(f"🍪 Всего установлено куков: {len(self.session.cookies)}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки куков: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+    
     def authenticate(self) -> bool:
         """
-        Авторизация на my.itmo.ru через OAuth (id.itmo.ru)
+        Авторизация на my.itmo.ru через OAuth (id.itmo.ru) или проверка куков
         
         Returns:
             True если авторизация успешна, False иначе
         """
         try:
+            # Если есть куки, сначала проверяем их
+            if self.session.cookies:
+                logger.info("🍪 Проверка авторизации через куки...")
+                test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=False)
+                
+                # Если получили успешный ответ и не редирект на авторизацию - уже авторизованы
+                if test_response.status_code == 200:
+                    # Проверяем содержимое страницы - может быть это страница расписания
+                    if 'schedule' in test_response.url.lower() or 'my.itmo.ru/schedule' in test_response.url:
+                        # Парсим HTML, чтобы убедиться, что это действительно страница расписания
+                        soup = BeautifulSoup(test_response.text, 'html.parser')
+                        # Ищем признаки страницы расписания (не страницы авторизации)
+                        if 'id.itmo.ru' not in test_response.url and 'login' not in test_response.url.lower():
+                            # Проверяем, есть ли на странице элементы расписания
+                            schedule_indicators = soup.find_all(['div', 'section'], class_=re.compile(r'schedule|lesson|class', re.I))
+                            if schedule_indicators or 'schedule' in test_response.text.lower()[:1000]:
+                                self.is_authenticated = True
+                                logger.info("✅ Авторизация через куки успешна!")
+                                return True
+            
+            # Если куки не сработали или их нет, пробуем обычную авторизацию
+            if not self.login or not self.password:
+                logger.warning("⚠️ Нет логина/пароля для авторизации и куки не работают")
+                return False
+            
             logger.info("🔐 Начало авторизации на my.itmo.ru через OAuth...")
             
             # Шаг 0: Проверяем, может быть уже авторизованы
