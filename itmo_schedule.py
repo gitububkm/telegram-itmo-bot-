@@ -926,25 +926,33 @@ class ITMOScheduleFetcher:
             api_url = f"{self.base_url}/api/schedule"
             params = {'date': date_str}
             
+            logger.info(f"🔍 Попытка получить расписание через API: {api_url}")
             try:
-                api_response = self.session.get(api_url, params=params, timeout=10)
+                headers = self._get_headers_with_cookies()
+                logger.info(f"🔍 Попытка получить расписание через API: {api_url} с параметрами {params}")
+                api_response = self.session.get(api_url, params=params, timeout=15, headers=headers)
+                logger.info(f"📊 API ответ: статус {api_response.status_code}, URL: {api_response.url}")
                 if api_response.status_code == 200:
                     try:
                         data = api_response.json()
                         if data:
                             logger.info("✅ Расписание получено через API")
                             return self._parse_api_schedule(data, target_date)
-                    except:
-                        pass
-            except:
-                pass
+                        else:
+                            logger.warning("⚠️ API вернул пустые данные")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка парсинга JSON из API: {e}")
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка запроса к API: {e}")
             
             # Если API не сработал, парсим HTML страницу
             schedule_url = f"{self.base_url}/schedule"
             params = {'date': date_str}
-            logger.info(f"🌐 Запрос расписания: {schedule_url} с параметрами {params}")
+            logger.info(f"🌐 Запрос расписания через HTML: {schedule_url} с параметрами {params}")
             headers = self._get_headers_with_cookies()
-            response = self.session.get(schedule_url, params=params, timeout=10, headers=headers)
+            logger.info(f"📤 Отправка запроса с {len(headers)} заголовками...")
+            response = self.session.get(schedule_url, params=params, timeout=15, headers=headers)
+            logger.info(f"📥 Получен ответ: статус {response.status_code}, размер {len(response.text)} символов")
             
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения расписания: {response.status_code}")
@@ -1120,12 +1128,28 @@ class ITMOScheduleFetcher:
         
         # Если ничего не найдено, логируем структуру страницы для отладки
         if not schedule['classes']:
-            logger.warning("⚠️ Занятия не найдены. Структура страницы:")
+            logger.warning("⚠️ Занятия не найдены в HTML. Возможно, страница использует JavaScript для загрузки данных.")
             # Ищем основные контейнеры
             main_containers = soup.find_all(['main', 'section', 'div'], class_=re.compile(r'main|content|schedule|calendar', re.I))
             logger.warning(f"   Найдено основных контейнеров: {len(main_containers)}")
-            # Логируем первые 1000 символов HTML для анализа
-            logger.warning(f"   Первые 1000 символов HTML: {html[:1000]}")
+            
+            # Пробуем найти данные в JavaScript переменных (SPA приложения часто хранят данные в window.__INITIAL_STATE__ или подобных)
+            import re as re_module
+            js_data_patterns = [
+                r'window\.__INITIAL_STATE__\s*=\s*({.+?});',
+                r'__NUXT__\s*=\s*({.+?});',
+                r'schedule["\']?\s*[:=]\s*(\[.+?\]|\{.+\})',
+            ]
+            for pattern in js_data_patterns:
+                matches = re_module.findall(pattern, html, re_module.DOTALL)
+                if matches:
+                    logger.info(f"🔍 Найдены данные в JavaScript переменных (паттерн: {pattern[:50]}...)")
+                    # Можно попробовать распарсить JSON из JavaScript
+                    break
+            
+            # Логируем первые 500 символов HTML для анализа (не 1000, чтобы не засорять логи)
+            logger.warning(f"   Первые 500 символов HTML: {html[:500]}")
+            logger.info("ℹ️ Возвращаем пустое расписание - возможно, на эту дату нет занятий или данные загружаются через JavaScript")
         
         return schedule
     

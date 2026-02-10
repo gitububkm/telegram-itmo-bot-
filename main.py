@@ -227,17 +227,25 @@ def get_schedule_for_date(date_str=None):
         # Если есть загрузчик с my.itmo.ru, используем его
         if schedule_fetcher:
             try:
+                logger.info(f"📅 Запрос расписания на {date_formatted} через schedule_fetcher...")
                 schedule_data = schedule_fetcher.get_schedule_for_date(target_date)
                 
-                if schedule_data and schedule_data.get('classes'):
-                    response = f"📅 {weekday_name} ({date_formatted})\n\n"
-                    
-                    for class_item in schedule_data['classes']:
-                        response += format_class_info(class_item) + "\n"
-                    
-                    return response
+                if schedule_data:
+                    classes = schedule_data.get('classes', [])
+                    if classes:
+                        response = f"📅 {weekday_name} ({date_formatted})\n\n"
+                        
+                        for class_item in classes:
+                            response += format_class_info(class_item) + "\n"
+                        
+                        logger.info(f"✅ Расписание получено: {len(classes)} занятий")
+                        return response
+                    else:
+                        logger.info(f"ℹ️ Расписание получено, но занятий нет")
+                        return f"📅 {weekday_name} ({date_formatted})\n\n🆓 Нет занятий"
                 else:
-                    return f"📅 {weekday_name} ({date_formatted})\n\n🆓 Нет занятий"
+                    logger.warning(f"⚠️ schedule_fetcher вернул None")
+                    return f"📅 {weekday_name} ({date_formatted})\n\n❌ Не удалось получить расписание. Попробуйте позже."
             except Exception as e:
                 logger.error(f"Ошибка получения расписания с my.itmo.ru: {e}")
                 # Пробуем использовать старый метод как fallback
