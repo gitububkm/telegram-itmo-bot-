@@ -48,10 +48,28 @@ class ITMOScheduleFetcher:
         self.base_url = "https://my.itmo.ru"
         self.id_url = "https://id.itmo.ru"
         self.is_authenticated = False
+        self.cookies_string = None  # Сохраняем исходную строку куков для использования в заголовках
         
         # Если переданы куки, устанавливаем их
         if cookies:
+            self.cookies_string = cookies
             self.set_cookies_from_string(cookies)
+            # Также добавляем куки в заголовки сессии напрямую (на случай, если cookies jar не работает)
+            if self.cookies_string:
+                self.session.headers['Cookie'] = self.cookies_string
+                logger.info("🍪 Куки добавлены в заголовки сессии")
+    
+    def _get_headers_with_cookies(self):
+        """
+        Возвращает заголовки с куками, если они есть
+        
+        Returns:
+            Словарь с заголовками или пустой словарь
+        """
+        headers = {}
+        if self.cookies_string:
+            headers['Cookie'] = self.cookies_string
+        return headers
     
     def set_cookies_from_string(self, cookies_string: str):
         """
@@ -122,8 +140,15 @@ class ITMOScheduleFetcher:
                     name = name.strip()
                     value = value.strip()
                     
-                    # Устанавливаем куку для домена my.itmo.ru
-                    self.session.cookies.set(name, value, domain='.itmo.ru')
+                    # Декодируем URL-encoded значения (например, %20 -> пробел, %2F -> /)
+                    try:
+                        from urllib.parse import unquote
+                        value = unquote(value)
+                    except Exception:
+                        pass  # Если не удалось декодировать, оставляем как есть
+                    
+                    # Устанавливаем куку для домена .itmo.ru (работает для всех поддоменов, включая my.itmo.ru)
+                    self.session.cookies.set(name, value, domain='.itmo.ru', path='/')
                     logger.info(f"✅ Установлена кука из простого формата: {name}")
             
             logger.info(f"🍪 Всего установлено куков: {len(self.session.cookies)}")
@@ -142,15 +167,41 @@ class ITMOScheduleFetcher:
         """
         try:
             # Если есть куки, сначала проверяем их
-            if self.session.cookies:
+            if self.session.cookies or self.cookies_string:
                 logger.info("🍪 Проверка авторизации через куки...")
-                test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=False)
+                logger.info(f"🍪 Всего куков в сессии: {len(self.session.cookies)}")
                 
-                # Если получили успешный ответ и не редирект на авторизацию - уже авторизованы
+                # Используем куки из исходной строки в заголовке Cookie (на случай, если установка через cookies jar не работает)
+                headers = self._get_headers_with_cookies()
+                if headers:
+                    logger.info("🍪 Используем куки из исходной строки в заголовке Cookie")
+                
+                # Пробуем получить страницу расписания с редиректами
+                test_response = self.session.get(f"{self.base_url}/schedule", timeout=10, allow_redirects=True, headers=headers)
+                
+                logger.info(f"📊 Статус ответа: {test_response.status_code}")
+                logger.info(f"📍 Финальный URL: {test_response.url}")
+                
+                # Если получили успешный ответ
                 if test_response.status_code == 200:
-                    # Проверяем содержимое страницы - может быть это страница расписания
-                    if 'schedule' in test_response.url.lower() or 'my.itmo.ru/schedule' in test_response.url:
-                        # Парсим HTML, чтобы убедиться, что это действительно страница расписания
+                    # Проверяем, что мы не попали на страницу авторизации
+                    if 'id.itmo.ru' in test_response.url or 'login' in test_response.url.lower():
+                        logger.warning(f"⚠️ Редирект на страницу авторизации: {test_response.url}")
+                        # Пробуем проверить содержимое страницы
+                        if 'login' in test_response.text.lower()[:500] or 'authorize' in test_response.text.lower()[:500]:
+                            logger.warning("⚠️ Получена страница авторизации - куки недействительны")
+                        else:
+                            # Возможно, это не страница авторизации, а что-то другое
+                            logger.info("🔍 Проверяем содержимое страницы...")
+                            soup = BeautifulSoup(test_response.text, 'html.parser')
+                            schedule_indicators = soup.find_all(['div', 'section'], class_=re.compile(r'schedule|lesson|class', re.I))
+                            if schedule_indicators or 'schedule' in test_response.text.lower()[:1000]:
+                                self.is_authenticated = True
+                                logger.info("✅ Авторизация через куки успешна!")
+                                return True
+                    else:
+                        # Мы на my.itmo.ru, проверяем содержимое
+                        logger.info("🔍 Проверяем содержимое страницы расписания...")
                         soup = BeautifulSoup(test_response.text, 'html.parser')
                         # Ищем признаки страницы расписания (не страницы авторизации)
                         if 'id.itmo.ru' not in test_response.url and 'login' not in test_response.url.lower():
@@ -160,6 +211,13 @@ class ITMOScheduleFetcher:
                                 self.is_authenticated = True
                                 logger.info("✅ Авторизация через куки успешна!")
                                 return True
+                            else:
+                                logger.warning(f"⚠️ Страница не содержит элементов расписания. Первые 500 символов: {test_response.text[:500]}")
+                else:
+                    logger.warning(f"⚠️ Неожиданный статус ответа: {test_response.status_code}")
+                    logger.warning(f"📍 URL: {test_response.url}")
+                    if test_response.text:
+                        logger.warning(f"📄 Первые 200 символов ответа: {test_response.text[:200]}")
             
             # Если куки не сработали или их нет, пробуем обычную авторизацию
             if not self.login or not self.password:
@@ -868,7 +926,8 @@ class ITMOScheduleFetcher:
             schedule_url = f"{self.base_url}/schedule"
             params = {'date': date_str}
             logger.info(f"🌐 Запрос расписания: {schedule_url} с параметрами {params}")
-            response = self.session.get(schedule_url, params=params, timeout=10)
+            headers = self._get_headers_with_cookies()
+            response = self.session.get(schedule_url, params=params, timeout=10, headers=headers)
             
             if response.status_code != 200:
                 logger.error(f"❌ Ошибка получения расписания: {response.status_code}")
