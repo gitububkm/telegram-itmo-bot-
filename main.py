@@ -10,17 +10,10 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 # Настройка логирования (должна быть до импортов, которые используют logger)
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-
-# Импортируем модуль для работы с my.itmo.ru
-try:
-    from itmo_schedule import ITMOScheduleFetcher
-except ImportError:
-    ITMOScheduleFetcher = None
-    logger.warning("Модуль itmo_schedule не найден, будет использоваться старая логика")
 
 # Импортируем веб-сервер
 try:
@@ -28,15 +21,16 @@ try:
 except ImportError:
     def initialize_telegram_app(app):
         pass
+
     def run_server():
         pass
+
     def update_bot_status(**kwargs):
         pass
 
 # Глобальные переменные
 SCHEDULE_DATA = None
 USERS_FILE = "bot_users.pkl"
-schedule_fetcher = None  # Объект для получения расписания с my.itmo.ru
 
 def load_users():
     """Загружает список пользователей из файла"""
@@ -64,77 +58,42 @@ def add_user(user_id):
     users.add(user_id)
     save_users(users)
 
-async def notify_all_users(bot, message):
-    """Отправляет уведомление всем пользователям"""
-    users = load_users()
-    success_count = 0
-    error_count = 0
-
-    for user_id in users:
-        try:
-            await bot.send_message(chat_id=user_id, text=message)
-            success_count += 1
-        except Exception as e:
-            logger.warning(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
-            error_count += 1
-
-    logger.info(f"Уведомления отправлены: {success_count} успешно, {error_count} ошибок")
-    return success_count, error_count
-
 def load_schedule():
-    """Инициализирует загрузчик расписания с my.itmo.ru"""
-    global schedule_fetcher
-    
-    # Проверяем, есть ли куки (приоритетный метод)
-    itmo_cookies = os.getenv('ITMO_COOKIES')
-    
-    if itmo_cookies and ITMOScheduleFetcher:
-        try:
-            schedule_fetcher = ITMOScheduleFetcher(cookies=itmo_cookies)
-            logger.info("✅ Инициализирован загрузчик расписания с my.itmo.ru (через куки)")
-            
-            # Пробуем авторизоваться через куки
-            if schedule_fetcher.authenticate():
-                logger.info("✅ Авторизация на my.itmo.ru через куки успешна")
-            else:
-                logger.warning("⚠️ Куки не работают, возможно они устарели. Обновите куки.")
-        except Exception as e:
-            logger.error(f"❌ Ошибка инициализации загрузчика расписания с куками: {e}")
-            schedule_fetcher = None
-    
-    # Если куки не заданы или не сработали, пробуем логин/пароль
-    if not schedule_fetcher:
-        itmo_login = os.getenv('ITMO_LOGIN')
-        itmo_password = os.getenv('ITMO_PASSWORD')
-        
-        if itmo_login and itmo_password and ITMOScheduleFetcher:
-            try:
-                schedule_fetcher = ITMOScheduleFetcher(itmo_login, itmo_password)
-                logger.info("✅ Инициализирован загрузчик расписания с my.itmo.ru (через логин/пароль)")
-                
-                # Пробуем авторизоваться сразу
-                if schedule_fetcher.authenticate():
-                    logger.info("✅ Авторизация на my.itmo.ru успешна")
-                else:
-                    logger.warning("⚠️ Не удалось авторизоваться на my.itmo.ru, будет попытка при первом запросе")
-            except Exception as e:
-                logger.error(f"❌ Ошибка инициализации загрузчика расписания: {e}")
-                schedule_fetcher = None
-    
-    # Если нет учетных данных для my.itmo.ru, используем старый метод
-    if not schedule_fetcher:
-        global SCHEDULE_DATA
-        schedule_json = os.getenv('SCHEDULE_JSON')
-        if schedule_json:
-            try:
-                SCHEDULE_DATA = json.loads(schedule_json)
-                logger.info("Расписание загружено из переменной окружения SCHEDULE_JSON")
-            except json.JSONDecodeError as e:
-                logger.error(f"Ошибка парсинга JSON расписания: {e}")
-                SCHEDULE_DATA = None
-        else:
-            logger.warning("⚠️ Не найдены переменные ITMO_LOGIN/ITMO_PASSWORD или SCHEDULE_JSON")
-            SCHEDULE_DATA = None
+    """Загружает статическое расписание из переменной окружения SCHEDULE_JSON.
+
+    Ожидаемый формат (пример):
+    {
+      "9.02": [
+        {
+          "subject": "Технические средства охраны",
+          "start": "09:50",
+          "end": "11:20",
+          "room": "311",
+          "address": "Песочная наб., д.14, лит.А",
+          "teacher": "Волхонский Владимир Владимирович"
+        }
+      ],
+      "10.02": []
+    }
+    """
+    global SCHEDULE_DATA
+
+    schedule_json = os.getenv("SCHEDULE_JSON")
+    if not schedule_json:
+        logger.error("❌ Переменная окружения SCHEDULE_JSON не установлена")
+        SCHEDULE_DATA = None
+        return
+
+    try:
+        SCHEDULE_DATA = json.loads(schedule_json)
+        if not isinstance(SCHEDULE_DATA, dict):
+            raise ValueError("SCHEDULE_JSON должен быть объектом JSON (словарь с ключами-д датами)")
+
+        logger.info("✅ Расписание загружено из переменной окружения SCHEDULE_JSON")
+        logger.info(f"Всего дней в расписании: {len(SCHEDULE_DATA)}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга JSON расписания: {e}")
+        SCHEDULE_DATA = None
 
 def get_current_week_type(target_date=None):
     """Определяет тип текущей недели (четная/нечетная)"""
@@ -179,6 +138,75 @@ def get_weekday_name(date):
     }
     return weekdays[date.weekday()]
 
+
+def _parse_time(time_str: str) -> datetime:
+    """Парсит время HH:MM в объект datetime (без учета даты)."""
+    return datetime.strptime(time_str, "%H:%M")
+
+
+def _build_day_schedule(raw_classes):
+    """Строит список занятий и окон на день из списков занятий по дате.
+
+    raw_classes — список словарей:
+      - subject: название предмета
+      - start: время начала пары HH:MM
+      - end: время окончания пары HH:MM
+      - room / address / teacher: опционально
+    """
+    if not raw_classes:
+        return []
+
+    # Сортируем по времени начала
+    try:
+        sorted_raw = sorted(raw_classes, key=lambda item: _parse_time(item.get("start", "00:00")))
+    except Exception as e:
+        logger.error(f"❌ Ошибка сортировки занятий по времени: {e}")
+        sorted_raw = raw_classes
+
+    classes = []
+    prev_end: datetime | None = None
+
+    for raw in sorted_raw:
+        subject = raw.get("subject", "Предмет не указан")
+        start_str = raw.get("start")
+        end_str = raw.get("end")
+
+        if not start_str or not end_str:
+            logger.warning(f"⚠️ Пропущено занятие без start/end: {subject}")
+            continue
+
+        try:
+            start_dt = _parse_time(start_str)
+            end_dt = _parse_time(end_str)
+        except ValueError:
+            logger.warning(f"⚠️ Неверный формат времени '{start_str}-{end_str}' для предмета '{subject}'")
+            continue
+
+        # Добавляем окно, если перерыв между парами больше 30 минут
+        if prev_end is not None:
+            gap_minutes = int((start_dt - prev_end).total_seconds() // 60)
+            if gap_minutes > 30:
+                window_item = {
+                    "window": f"{prev_end.strftime('%H:%M')}-{start_dt.strftime('%H:%M')}",
+                    "duration": f"{gap_minutes} мин",
+                }
+                classes.append(window_item)
+
+        class_item = {
+            "subject": subject,
+            "time": f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}",
+        }
+
+        for key in ("room", "address", "teacher"):
+            if key in raw:
+                class_item[key] = raw[key]
+
+        classes.append(class_item)
+        prev_end = end_dt
+
+    return classes
+
+
 def format_class_info(class_item):
     """Форматирует информацию о занятии в минималистичном стиле"""
     if 'window' in class_item:
@@ -201,20 +229,18 @@ def format_class_info(class_item):
         return result
 
 def get_schedule_for_date(date_str=None):
-    """Получает расписание для указанной даты"""
-    global schedule_fetcher
-    
+    """Получает расписание для указанной даты из SCHEDULE_JSON (по дате)."""
     try:
         if date_str:
             # Парсим дату в формате ДД.ММ или ДД/ММ
             date_str = date_str.strip()
-            if '/' in date_str:
-                day, month = map(int, date_str.split('/'))
-            elif '.' in date_str:
-                day, month = map(int, date_str.split('.'))
+            if "/" in date_str:
+                day, month = map(int, date_str.split("/"))
+            elif "." in date_str:
+                day, month = map(int, date_str.split("."))
             else:
                 return "❌ Неверный формат даты. Используйте формат ДД.ММ или ДД/ММ"
-            
+
             year = datetime.now(ZoneInfo("Europe/Moscow")).year
             target_date = datetime(year, month, day, tzinfo=ZoneInfo("Europe/Moscow"))
         else:
@@ -222,61 +248,25 @@ def get_schedule_for_date(date_str=None):
             target_date = get_moscow_time()
 
         weekday_name = get_weekday_name(target_date)
-        date_formatted = target_date.strftime('%d.%m.%Y')
+        date_formatted = target_date.strftime("%d.%m.%Y")
 
-        # Если есть загрузчик с my.itmo.ru, используем его
-        if schedule_fetcher:
-            try:
-                logger.info(f"📅 Запрос расписания на {date_formatted} через schedule_fetcher...")
-                schedule_data = schedule_fetcher.get_schedule_for_date(target_date)
-                
-                if schedule_data:
-                    classes = schedule_data.get('classes', [])
-                    if classes:
-                        response = f"📅 {weekday_name} ({date_formatted})\n\n"
-                        
-                        for class_item in classes:
-                            response += format_class_info(class_item) + "\n"
-                        
-                        logger.info(f"✅ Расписание получено: {len(classes)} занятий")
-                        return response
-                    else:
-                        logger.info(f"ℹ️ Расписание получено, но занятий нет")
-                        return f"📅 {weekday_name} ({date_formatted})\n\n🆓 Нет занятий"
-                else:
-                    logger.warning(f"⚠️ schedule_fetcher вернул None")
-                    return f"📅 {weekday_name} ({date_formatted})\n\n❌ Не удалось получить расписание. Попробуйте позже."
-            except Exception as e:
-                logger.error(f"Ошибка получения расписания с my.itmo.ru: {e}")
-                # Пробуем использовать старый метод как fallback
-                pass
-
-        # Используем старый метод (из переменной окружения)
         if not SCHEDULE_DATA:
-            return "❌ Расписание не загружено. Проверьте настройки ITMO_LOGIN/ITMO_PASSWORD или SCHEDULE_JSON"
+            return "❌ Расписание не загружено. Проверьте переменную окружения SCHEDULE_JSON"
 
-        current_week_type = get_current_week_type(target_date)
+        # Ключ в JSON в формате Д.ММ (например, 9.02, 10.03)
+        key = f"{target_date.day}.{target_date.month:02d}"
+        raw_classes = SCHEDULE_DATA.get(key, [])
+        classes = _build_day_schedule(raw_classes)
 
-        # Находим нужную неделю в расписании
-        for week in SCHEDULE_DATA['schedule']:
-            if week['week'] == current_week_type:
-                # Находим нужный день
-                for day in week['days']:
-                    if day['day'] == weekday_name:
-                        classes = day['classes']
+        # Если список пустой - это выходной
+        if not classes:
+            return f"📅 {weekday_name} ({date_formatted})\n\n🆓 Выходной"
 
-                        if not classes:
-                            note = day.get('note', 'Нет занятий')
-                            return f"📅 {weekday_name} ({date_formatted})\n\n{note}"
+        response = f"📅 {weekday_name} ({date_formatted})\n\n"
+        for class_item in classes:
+            response += format_class_info(class_item) + "\n"
 
-                        response = f"📅 {weekday_name} ({date_formatted})\n\n"
-
-                        for class_item in classes:
-                            response += format_class_info(class_item) + "\n"
-
-                        return response
-
-        return f"❌ Расписание для {weekday_name} не найдено"
+        return response
     except ValueError:
         return "❌ Неверный формат даты. Используйте формат ДД.ММ или ДД/ММ"
     except Exception as e:
@@ -284,76 +274,49 @@ def get_schedule_for_date(date_str=None):
         return "❌ Ошибка при получении расписания"
 
 def get_week_schedule():
-    """Получает расписание на текущую неделю"""
-    global schedule_fetcher
-    
+    """Получает расписание на текущую неделю из SCHEDULE_JSON (по датам)."""
     current_time = get_moscow_time()
     days_since_monday = current_time.weekday()
     week_start = current_time - timedelta(days=days_since_monday)
     week_end = week_start + timedelta(days=6)
-
-    # Если есть загрузчик с my.itmo.ru, используем его
-    if schedule_fetcher:
-        try:
-            week_schedules = schedule_fetcher.get_week_schedule(week_start)
-            
-            response = f"📅 Расписание на неделю ({week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m.%Y')})\n\n"
-            
-            for day_schedule in week_schedules:
-                day_date = day_schedule.get('date', week_start)
-                weekday_name = get_weekday_name(day_date)
-                date_formatted = day_date.strftime('%d.%m')
-                
-                response += f"📅 {weekday_name} ({date_formatted}):\n"
-                
-                classes = day_schedule.get('classes', [])
-                if not classes:
-                    response += "   🆓 Нет занятий\n\n"
-                else:
-                    for class_item in classes:
-                        class_text = format_class_info(class_item)
-                        # Добавляем отступ для каждой строки
-                        indented = '\n'.join(f"   {line}" for line in class_text.split('\n') if line.strip())
-                        response += f"{indented}\n"
-                    response += "\n"
-            
-            return response
-        except Exception as e:
-            logger.error(f"Ошибка получения недельного расписания с my.itmo.ru: {e}")
-            # Пробуем использовать старый метод как fallback
-            pass
-
-    # Используем старый метод (из переменной окружения)
     if not SCHEDULE_DATA:
-        return "❌ Расписание не загружено. Проверьте настройки ITMO_LOGIN/ITMO_PASSWORD или SCHEDULE_JSON"
+        return "❌ Расписание не загружено. Проверьте переменную окружения SCHEDULE_JSON"
 
-    current_week_type = get_current_week_type()
+    response = f"📅 Расписание на неделю ({week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m.%Y')})\n\n"
 
-    # Находим нужную неделю в расписании
-    for week in SCHEDULE_DATA['schedule']:
-        if week['week'] == current_week_type:
-            response = f"📅 Расписание на неделю ({week_start.strftime('%d.%m')} - {week_end.strftime('%d.%m.%Y')})\n\n"
+    weekday_order = [
+        "Понедельник",
+        "Вторник",
+        "Среда",
+        "Четверг",
+        "Пятница",
+        "Суббота",
+        "Воскресенье",
+    ]
 
-            for day in week['days']:
-                day_name = day['day']
-                classes = day['classes']
+    for offset, day_name in enumerate(weekday_order):
+        day_date = week_start + timedelta(days=offset)
+        date_formatted = day_date.strftime("%d.%m")
 
-                response += f"📅 {day_name}:\n"
+        key = f"{day_date.day}.{day_date.month:02d}"
+        raw_classes = SCHEDULE_DATA.get(key, [])
+        classes = _build_day_schedule(raw_classes)
 
-                if not classes:
-                    note = day.get('note', 'Нет занятий')
-                    response += f"   {note}\n\n"
-                else:
-                    for class_item in classes:
-                        class_text = format_class_info(class_item)
-                        # Добавляем отступ для каждой строки
-                        indented = '\n'.join(f"   {line}" for line in class_text.split('\n') if line.strip())
-                        response += f"{indented}\n"
-                response += "\n"
+        response += f"📅 {day_name} ({date_formatted}):\n"
 
-            return response
+        # Если список пустой - это выходной
+        if not classes:
+            response += "   🆓 Выходной\n\n"
+        else:
+            for class_item in classes:
+                class_text = format_class_info(class_item)
+                indented = "\n".join(
+                    f"   {line}" for line in class_text.split("\n") if line.strip()
+                )
+                response += f"{indented}\n"
+            response += "\n"
 
-    return "❌ Расписание не найдено"
+    return response
 
 def get_moscow_time():
     """Получает текущее время в Москве"""
@@ -479,17 +442,14 @@ async def create_application():
     """Создает и настраивает Telegram Application асинхронно"""
     logger.info("🚀 Инициализация Telegram бота ИТМО...")
 
-    # Инициализируем загрузчик расписания
+    # Инициализируем статическое расписание
     load_schedule()
 
-    # Проверяем, что хотя бы один источник расписания доступен
-    global schedule_fetcher, SCHEDULE_DATA
-    if not schedule_fetcher and not SCHEDULE_DATA:
-        logger.error("❌ Не удалось инициализировать источник расписания")
-        logger.error("Убедитесь, что установлены переменные окружения:")
-        logger.error("  - ITMO_COOKIES (рекомендуется, для получения с my.itmo.ru через куки)")
-        logger.error("  - или ITMO_LOGIN и ITMO_PASSWORD (для получения с my.itmo.ru через авторизацию)")
-        logger.error("  - или SCHEDULE_JSON (для использования статического расписания)")
+    # Проверяем, что источник расписания доступен
+    global SCHEDULE_DATA
+    if not SCHEDULE_DATA:
+        logger.error("❌ Не удалось инициализировать расписание из SCHEDULE_JSON")
+        logger.error("Убедитесь, что переменная окружения SCHEDULE_JSON содержит корректный JSON.")
         return None
 
     # Проверяем токен
